@@ -16,7 +16,7 @@ import wandb
 import utils
 from model import EZVSL
 from losses import compute_loss
-from datasets import get_train_dataset, get_test_dataset
+from datasets import get_train_dataset, get_test_dataset, get_train_test_dataset
 
 
 def inverse_normalize(tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
@@ -43,7 +43,7 @@ def get_arguments():
 
     # Data params
     parser.add_argument('--trainset', default='vggss_144k', type=str, help='trainset (flickr or vggss)')
-    parser.add_argument('--testset', default='vggss', type=str, help='testset,(flickr or vggss)')
+    parser.add_argument('--testset', default='vggss_144k', type=str, help='testset,(flickr or vggss)')
     parser.add_argument('--train_data_path', default='/media/y/datasets/vggsound/train', type=str, help='Root directory path of train data')
     parser.add_argument('--test_data_path', default='/media/v/vggss', type=str, help='Root directory path of test data')
     parser.add_argument('--test_gt_path', default='metadata/vggss_annotations.json', type=str)
@@ -65,9 +65,9 @@ def get_arguments():
     parser.add_argument('--lambda_recon', default=0.1, type=float)
 
     # training/evaluation parameters
-    parser.add_argument('--debug', type=str, default='False', help='debug mode')
+    parser.add_argument('--debug', type=str, default='True', help='debug mode')
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")
-    parser.add_argument('--batch_size', default=128, type=int, help='Batch Size')
+    parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
     parser.add_argument("--init_lr", type=float, default=0.0001, help="initial learning rate")
     parser.add_argument("--seed", type=int, default=12345, help="random seed")
     parser.add_argument('--wandb', type=str, default='True', help='use wandb for logging')
@@ -174,7 +174,12 @@ def main_worker(gpu, ngpus_per_node, args):
         print(f'loaded from {os.path.join(model_dir, "latest.pth")}')
 
     # Dataloaders
-    traindataset = get_train_dataset(args)
+    if args.testset == 'vggss_144k':
+        traindataset, testdataset = get_train_test_dataset(args)
+    else:
+        traindataset = get_train_dataset(args)
+        testdataset = get_test_dataset(args)
+
     train_sampler = None
     if args.multiprocessing_distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(traindataset)
@@ -183,20 +188,25 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=False, sampler=train_sampler, drop_last=True,
         persistent_workers=args.workers > 0)
 
-    testdataset = get_test_dataset(args)
     test_loader = torch.utils.data.DataLoader(
-        testdataset, batch_size=1, shuffle=False,
+        testdataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=False, drop_last=False,
         persistent_workers=args.workers > 0)
     print("Loaded dataloader.")
 
     # =============================================================== #
     # Training loop
-    cIoU, auc = validate(test_loader, model, args, start_epoch)
-    print(f'    ----Validation epoch {start_epoch}----')
-    print(f'    cIoU (epoch {start_epoch}): {cIoU}')
-    print(f'    AUC (epoch {start_epoch}): {auc}')
-
+    if args.testset == 'vggss_144k':
+        loss_info_nce = validate(test_loader, model, args, start_epoch)
+        print(f'    ----Validation epoch {start_epoch}----')
+        print(f'    Info NCE Loss (epoch {start_epoch}): {loss_info_nce:.4f}')
+    else:
+        cIoU, auc = validate_vggss(test_loader, model, args, start_epoch)
+        print(f'    ----Validation epoch {start_epoch}----')
+        print(f'    cIoU (epoch {start_epoch}): {cIoU:.4f}')
+        print(f'    AUC (epoch {start_epoch}): {auc:.4f}')
+        
+    best_loss_info_nce = loss_info_nce
     for epoch in range(start_epoch, args.epochs):
         if args.multiprocessing_distributed:
             train_loader.sampler.set_epoch(epoch)
@@ -205,20 +215,32 @@ def main_worker(gpu, ngpus_per_node, args):
         train(train_loader, model, optimizer, epoch, args)
 
         # Evaluate
-        cIoU, auc = validate(test_loader, model, args, epoch)
-        print(f'    ----Validation epoch {epoch+1}----')
-        print(f'    cIoU (epoch {epoch+1}): {cIoU} (best: {best_cIoU})')
-        print(f'    AUC (epoch {epoch+1}): {auc} (best: {best_Auc})')
-        
-        # Log validation metrics to wandb (only on rank 0)
-        if args.wandb and args.rank == 0:
-            wandb.log({
-                'val/cIoU': cIoU,
-                'val/AUC': auc,
-                'val/best_cIoU': best_cIoU,
-                'val/best_AUC': best_Auc,
-                'epoch': epoch + 1
-            })
+        if args.testset == 'vggss_144k':
+            loss_info_nce = validate(test_loader, model, args, start_epoch)
+            print(f'    ----Validation epoch {start_epoch}----')
+            print(f'    Info NCE Loss (epoch {start_epoch}): {loss_info_nce:.4f}')
+        else:
+            cIoU, auc = validate_vggss(test_loader, model, args, start_epoch)
+            print(f'    ----Validation epoch {start_epoch}----')
+            print(f'    cIoU (epoch {start_epoch}): {cIoU:.4f}')
+            print(f'    AUC (epoch {start_epoch}): {auc:.4f}')
+
+        # # Log validation metrics to wandb (only on rank 0)
+        # if args.wandb a== 'True':
+        #     if args.testset == 'vggss_144k':
+        #         wandb.log({
+        #             'val/Info NCE Loss': loss_info_nce.item(),
+        #             'val/avg_loss': avg_loss.avg,
+        #             'val/epoch': epoch
+        #         })
+        #     else:
+        #         wandb.log({
+        #             'val/cIoU': cIoU,
+        #             'val/AUC': auc,
+        #             'val/best_cIoU': best_cIoU,
+        #             'val/best_AUC': best_Auc,
+        #             'epoch': epoch + 1
+        #         })
         
         # Checkpoint
         if args.rank == 0:
@@ -229,10 +251,17 @@ def main_worker(gpu, ngpus_per_node, args):
                    'best_Auc': best_Auc}
             torch.save(ckp, os.path.join(model_dir, 'latest.pth'))
             print(f"Model saved to {model_dir}")
-        if cIoU >= best_cIoU:
-            best_cIoU, best_Auc = cIoU, auc
-            if args.rank == 0:
-                torch.save(ckp, os.path.join(model_dir, 'best.pth'))
+        
+        if args.testset == 'vggss_144k':
+            if loss_info_nce >= best_loss_info_nce:
+                best_loss_info_nce = loss_info_nce.item()
+                if args.rank == 0:
+                    torch.save(ckp, os.path.join(model_dir, 'best.pth'))
+        else:
+            if cIoU >= best_cIoU:
+                best_cIoU, best_Auc = cIoU, auc
+                if args.rank == 0:
+                    torch.save(ckp, os.path.join(model_dir, 'best.pth'))
     
     # Finish wandb run
     if args.wandb and args.rank == 0:
@@ -242,6 +271,13 @@ def train(train_loader, model, optimizer, epoch, args):
     model.train()
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
+    
+    # Initialize loss averages for the epoch
+    avg_total_loss = AverageMeter('Total Loss', ':.4f')
+    avg_info_nce_loss = AverageMeter('Info NCE Loss', ':.4f')
+    avg_match_loss = AverageMeter('Matching Loss', ':.4f') 
+    avg_div_loss = AverageMeter('Divergence Loss', ':.4f')
+    avg_recon_loss = AverageMeter('Reconstruction Loss', ':.4f')
 
     end = time.time()
     pbar = tqdm.tqdm(train_loader, desc=f'Training epoch {epoch+1}')
@@ -257,6 +293,13 @@ def train(train_loader, model, optimizer, epoch, args):
         loss_info_nce, loss_match, loss_div, loss_recon = compute_loss(img_slot_out, aud_slot_out, args, mode='train')
 
         loss = args.lambda_info_nce * loss_info_nce + args.lambda_match * loss_match + args.lambda_div * loss_div + args.lambda_recon * loss_recon      
+
+        # Update running averages
+        avg_total_loss.update(loss.item())
+        avg_info_nce_loss.update(loss_info_nce.item())
+        avg_match_loss.update(loss_match.item())
+        avg_div_loss.update(loss_div.item()) 
+        avg_recon_loss.update(loss_recon.item())
 
         optimizer.zero_grad()
         loss.backward()
@@ -282,8 +325,72 @@ def train(train_loader, model, optimizer, epoch, args):
 
         del loss
 
+    # Log epoch averages to wandb
+    if args.wandb == 'True':
+        wandb.log({
+            'train/epoch_avg_total_loss': avg_total_loss.avg,
+            'train/epoch_avg_info_nce_loss': avg_info_nce_loss.avg,
+            'train/epoch_avg_matching_loss': avg_match_loss.avg,
+            'train/epoch_avg_divergence_loss': avg_div_loss.avg,
+            'train/epoch_avg_reconstruction_loss': avg_recon_loss.avg,
+            'train/epoch': epoch
+        })
+
 
 def validate(test_loader, model, args, epoch):
+    model.train(False)
+    avg_loss = AverageMeter('Validation Loss', ':.4f')
+    
+    for step, (image, spec, bboxes, _) in enumerate(tqdm.tqdm(test_loader, desc='Validating')):
+        if args.gpu is not None:
+            spec = spec.cuda(args.gpu, non_blocking=True)
+            image = image.cuda(args.gpu, non_blocking=True)
+        
+        B = image.shape[0]
+        
+        aud_slot_out, img_slot_out = model(image.float(), spec.float())
+
+        loss_info_nce = compute_loss(img_slot_out, aud_slot_out, args, mode='val')
+        avg_loss.update(loss_info_nce.item())
+
+        avl_map = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
+
+        avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
+        avl_map = avl_map.data.cpu().numpy()
+
+        if args.wandb == 'True' and step == 0:
+            for i in range(2):
+                # Get prediction and ground truth
+                pred = utils.normalize_img(avl_map[i, 0])
+                off_target = utils.normalize_img(avl_map[i, 1])
+            
+                # Create visualization and log to wandb
+                # Inverse normalize using ImageNet mean/std
+                orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
+                orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+                
+                fig = create_visualization(orig_img, pred, off_target)
+                wandb.log({f"val/pred_overlay_{step}_{i}": wandb.Image(fig)})
+                plt.close(fig)
+
+        # Log current loss
+        if args.wandb == 'True':
+            wandb.log({
+                'val/current_loss': loss_info_nce.item(),
+                'val/step': step
+            })
+
+    # Log validation metrics to wandb (only on rank 0)
+    if args.wandb and args.rank == 0:
+        wandb.log({
+            'val/Info NCE Loss': loss_info_nce.item(),
+            'val/avg_loss': avg_loss.avg,
+            'val/epoch': epoch
+        })
+    return loss_info_nce.item()
+
+
+def validate_vggss(test_loader, model, args, epoch):
     model.train(False)
     evaluator = utils.Evaluator()
     for step, (image, spec, bboxes, _) in enumerate(tqdm.tqdm(test_loader, desc='Validating')):
@@ -317,7 +424,6 @@ def validate(test_loader, model, args, epoch):
                     fig = create_visualization(orig_img, pred, off_target, gt_map[i])
                     wandb.log({f"val/pred_overlay_{step}_{i}": wandb.Image(fig)})
                     plt.close(fig)
-
 
             thr = np.sort(pred.flatten())[int(pred.shape[0] * pred.shape[1] / 2)]
             evaluator.cal_CIOU(pred, gt_map, thr)
@@ -358,7 +464,7 @@ class AverageMeter(object):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
         return fmtstr.format(**self.__dict__)
 
-def create_visualization(image, pred, off_target, gt_map):
+def create_visualization(image, pred, off_target, gt_map=None):
     """Create visualization with original image, prediction overlay and bounding box
     
     Args:
@@ -382,24 +488,25 @@ def create_visualization(image, pred, off_target, gt_map):
     ax2.axis('off')
     
     # Draw ground truth bounding box on both plots
-    y_idx, x_idx = np.where(gt_map == 1)
-    if len(y_idx) > 0:
-        min_x, max_x = x_idx.min(), x_idx.max()
-        min_y, max_y = y_idx.min(), y_idx.max()
-        
-        rect1 = patches.Rectangle((min_x, min_y), max_x-min_x, max_y-min_y,
-                               linewidth=2, edgecolor='g', facecolor='none')
-        rect2 = patches.Rectangle((min_x, min_y), max_x-min_x, max_y-min_y,
-                               linewidth=2, edgecolor='g', facecolor='none')
-        ax1.add_patch(rect1)
-        ax2.add_patch(rect2)
+    if gt_map is not None:
+        y_idx, x_idx = np.where(gt_map == 1)
+        if len(y_idx) > 0:
+            min_x, max_x = x_idx.min(), x_idx.max()
+            min_y, max_y = y_idx.min(), y_idx.max()
+            
+            rect1 = patches.Rectangle((min_x, min_y), max_x-min_x, max_y-min_y,
+                                linewidth=2, edgecolor='g', facecolor='none')
+            rect2 = patches.Rectangle((min_x, min_y), max_x-min_x, max_y-min_y,
+                                linewidth=2, edgecolor='g', facecolor='none')
+            ax1.add_patch(rect1)
+            ax2.add_patch(rect2)
     
     ax1.set_title('Target Prediction')
     ax2.set_title('Off-Target Prediction')
     
     plt.tight_layout()
     return fig
-
+            
 class ProgressMeter(object):
     def __init__(self, num_batches, meters, prefix="", fp=None):
         self.batch_fmtstr = self._get_batch_fmtstr(num_batches)

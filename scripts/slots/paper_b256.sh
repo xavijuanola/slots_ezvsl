@@ -1,0 +1,22 @@
+python train.py \
+    --train_data_path /ext3/vggsound/train \
+    --test_data_path /ext3/vggsound/train \
+    --test_gt_path metadata/vggss_annotations.json \
+    --experiment_name ezvsl_slots \
+    --trainset 'vggss_144k' \
+    --testset 'vggss_144k' \
+    --debug 'False' \
+    --wandb 'True' \
+    --wandb_project 'ezvsl-slots' \
+    --num_slots 2 \
+    --iters 5 \
+    --eps 1e-8 \
+    --hidden_dim 512 \
+    --slots_no_W 'False' \
+    --lambda_info_nce 1.0 \
+    --lambda_match 100.0 \
+    --lambda_div 0.1 \
+    --lambda_recon 0.1 \
+    --epochs 200 \
+    --batch_size 256 \
+    --init_lr 0.00005

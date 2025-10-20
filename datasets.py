@@ -134,6 +134,86 @@ class AudioVisualDataset(Dataset):
         except Exception:
             return self.getitem(random.sample(range(len(self)), 1)[0])
 
+def get_train_test_dataset(args):
+    image_path = f"{args.train_data_path}/total_video_frames/"
+    audio_path = f"{args.train_data_path}/total_video_3s_audio/"
+
+    # List directory
+    audio_files = {fn.split('.wav')[0] for fn in os.listdir(audio_path) if fn.endswith('.wav')}
+    image_files = {fn for fn in os.listdir(image_path)}
+    total_files = audio_files.intersection(image_files)
+    print(f"{len(total_files)} total available files")
+
+    # Subsample if specified
+    if args.trainset.lower() in {'vggss', 'flickr'}:
+        pass    # use full dataset
+    else:
+        subset = set(open(f"metadata/{args.trainset}.txt").read().splitlines())
+        avail_files = total_files.intersection(subset)
+        print(f"{len(avail_files)} valid subset files")
+    avail_files = sorted(list(avail_files))
+
+    # Get 5000 random files from total_files that are not in avail_files
+    remaining_files = list(total_files - set(avail_files))
+    random.shuffle(remaining_files)
+    val_data = remaining_files[:5000]
+
+    if args.debug == 'True':
+        avail_files = avail_files[:500]
+        val_data = val_data[:50]
+
+    audio_files_train = sorted([dt+'.wav' for dt in avail_files])
+    image_files_train = sorted([dt+'.jpg' for dt in avail_files])
+
+    audio_files_val = sorted([dt+'.wav' for dt in val_data])
+    image_files_val = sorted([dt+'.jpg' for dt in val_data])
+    
+    # Transforms
+    image_transform_train = transforms.Compose([
+        transforms.Resize(int(224 * 1.1), Image.BICUBIC),
+        transforms.RandomCrop((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])])
+    audio_transform_train = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.0], std=[12.0])])
+    
+    image_transform_val = transforms.Compose([
+        transforms.Resize(int(224 * 1.1), Image.BICUBIC),
+        transforms.RandomCrop((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])])
+    audio_transform_val = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.0], std=[12.0])])
+    
+    train_dataset = AudioVisualDataset(
+        image_files=image_files_train,
+        audio_files=audio_files_train,
+        image_path=image_path,
+        audio_path=audio_path,
+        audio_dur=3.,
+        mode='train',
+        image_transform=image_transform_train,
+        audio_transform=audio_transform_train
+    )
+
+    val_dataset = AudioVisualDataset(
+        image_files=image_files_val,
+        audio_files=audio_files_val,
+        image_path=image_path,
+        audio_path=audio_path,
+        audio_dur=3.,
+        mode='train',
+        image_transform=image_transform_val,
+        audio_transform=audio_transform_val
+    )
+
+    return train_dataset, val_dataset
 
 def get_train_dataset(args):
     image_path = f"{args.train_data_path}/total_video_frames/"
