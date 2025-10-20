@@ -18,7 +18,8 @@ class EZVSL(nn.Module):
         # Audio model
         self.audnet = resnet18()
         self.audnet.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        self.audnet.avgpool = nn.AdaptiveMaxPool2d((1, 1))
+        # self.audnet.avgpool = nn.AdaptiveMaxPool2d((1, 1))
+        self.audnet.avgpool = nn.Identity()
         self.audnet.fc = nn.Identity()
         self.aud_conv1d = nn.Conv1d(512, dim, kernel_size=1)
         # self.aud_proj = nn.Linear(512, dim)
@@ -59,13 +60,13 @@ class EZVSL(nn.Module):
 
     def forward(self, image, audio):
         # Image
-        img = self.imgnet(image)[0].unflatten(1, (512, 49))
+        img = self.imgnet(image).unflatten(1, (512, 49))
         img_maxpool = img.max(dim=-1).values
         img_maxpool = self.img_conv1d(img_maxpool.unsqueeze(-1)).squeeze(-1)
         img_maxpool = nn.functional.normalize(img_maxpool, dim=1)
 
         # Audio
-        aud = self.audnet(audio)[1]
+        aud = self.audnet(audio).unflatten(1, (512, 9, 7))
         aud_temp = aud.clone().max(dim=2).values # Max-Pooling over frequency dimension
         aud_maxpool = aud_temp.clone().max(dim=-1).values # Max-Pooling over temporal dimension
         aud_maxpool = self.aud_conv1d(aud_maxpool.unsqueeze(-1)).squeeze(-1)

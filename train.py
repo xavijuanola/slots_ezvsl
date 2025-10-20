@@ -264,7 +264,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     torch.save(ckp, os.path.join(model_dir, 'best.pth'))
     
     # Finish wandb run
-    if args.wandb and args.rank == 0:
+    if args.wandb == 'True' and args.rank == 0:
         wandb.finish()
 
 def train(train_loader, model, optimizer, epoch, args):
@@ -381,7 +381,7 @@ def validate(test_loader, model, args, epoch):
             })
 
     # Log validation metrics to wandb (only on rank 0)
-    if args.wandb and args.rank == 0:
+    if args.wandb == 'True' and args.rank == 0:
         wandb.log({
             'val/Info NCE Loss': loss_info_nce.item(),
             'val/avg_loss': avg_loss.avg,
@@ -432,7 +432,7 @@ def validate_vggss(test_loader, model, args, epoch):
     AUC = evaluator.finalize_AUC()
 
     # Log validation metrics to wandb (only on rank 0)
-    if args.wandb and args.rank == 0:
+    if args.wandb == 'True' and args.rank == 0:
         wandb.log({
             'val/cIoU': cIoU,
             'val/AUC': AUC,
