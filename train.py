@@ -309,7 +309,7 @@ def train(train_loader, model, optimizer, epoch, args):
         end = time.time()
 
         if i % 10 == 0 or i == len(train_loader) - 1:
-            pbar.set_postfix({'TOTAL': f'{loss.item():.4f}', 'INFO NCE': f'{loss_info_nce.item():.4f}', 'MATCHING': f'{loss_match.item():.4f}', 'DIVERGENCE': f'{loss_div.item():.4f}', 'RECONSTRUCTION': f'{loss_recon.item():.4f}'})
+            pbar.set_postfix({'TOTAL': f'{loss.item():.4f}', 'CONTR': f'{loss_info_nce.item():.4f}', 'MATCH': f'{loss_match.item():.4f}', 'DIV': f'{loss_div.item():.4f}', 'REC': f'{loss_recon.item():.4f}'})
             
             # Log to wandb (only on rank 0)
             if args.wandb == 'True':
