@@ -69,6 +69,7 @@ def get_arguments():
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")
     parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
     parser.add_argument("--init_lr", type=float, default=0.0001, help="initial learning rate")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="weight decay")
     parser.add_argument("--seed", type=int, default=12345, help="random seed")
     parser.add_argument('--wandb', type=str, default='True', help='use wandb for logging')
     parser.add_argument('--wandb_project', type=str, default='ezvsl-slots', help='wandb project name')
@@ -162,7 +163,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # print(model)
 
     # Optimizer
-    optimizer, scheduler = utils.build_optimizer_and_scheduler_adam(model, args)
+    optimizer, scheduler = utils.build_optimizer_and_scheduler_adamW(model, args)
 
     # Resume if possible
     start_epoch, best_cIoU, best_Auc = 0, 0., 0.
@@ -180,12 +181,11 @@ def main_worker(gpu, ngpus_per_node, args):
         traindataset = get_train_dataset(args)
         testdataset = get_test_dataset(args)
 
-    train_sampler = None
     if args.multiprocessing_distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(traindataset)
     train_loader = torch.utils.data.DataLoader(
-        traindataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=False, sampler=train_sampler, drop_last=True,
+        traindataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=False, sampler=None, drop_last=False,
         persistent_workers=args.workers > 0)
 
     test_loader = torch.utils.data.DataLoader(
@@ -254,7 +254,7 @@ def main_worker(gpu, ngpus_per_node, args):
         
         if args.testset == 'vggss_144k':
             if loss_info_nce >= best_loss_info_nce:
-                best_loss_info_nce = loss_info_nce.item()
+                best_loss_info_nce = loss_info_nce
                 if args.rank == 0:
                     torch.save(ckp, os.path.join(model_dir, 'best.pth'))
         else:
@@ -281,7 +281,9 @@ def train(train_loader, model, optimizer, epoch, args):
 
     end = time.time()
     pbar = tqdm.tqdm(train_loader, desc=f'Training epoch {epoch+1}')
-    for i, (image, spec, _, _) in enumerate(pbar):
+    for i, (image, spec, bboxes, filename) in enumerate(pbar):
+        if '0kGVS6nRjgA_000091' in filename:
+            print(filename)
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
@@ -322,6 +324,37 @@ def train(train_loader, model, optimizer, epoch, args):
                     'train/epoch': epoch,
                     'train/step': epoch * len(train_loader) + i
                 })
+            
+        # Add visualization logging for specific files
+        if args.wandb == 'True':
+            # Get attention maps for visualization
+            B = image.shape[0]
+            avl_map = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
+            avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
+            avl_map = avl_map.data.cpu().numpy()
+            
+            # Log visualizations for files listed in args.train_log_files if present in filename
+            log_indices = []
+            # Check if args has train_log_files attribute and it's not None/empty
+            if hasattr(args, 'train_log_files') and args.train_log_files:
+                for idx, fname in enumerate(filename):
+                    if any(log_file in fname for log_file in args.train_log_files):
+                        log_indices.append(idx)
+            
+            if log_indices != []:
+                for idx in log_indices:
+                    # Get prediction and ground truth
+                    pred = utils.normalize_img(avl_map[idx, 0])
+                    off_target = utils.normalize_img(avl_map[idx, 1])
+                
+                    # Create visualization and log to wandb
+                    # Inverse normalize using ImageNet mean/std
+                    orig_img = inverse_normalize(image[idx]).cpu().permute(1,2,0).numpy()
+                    orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+                    
+                    fig = create_visualization(orig_img, pred, off_target)
+                    wandb.log({f"infer_train/{filename[idx]}": wandb.Image(fig)})
+                    plt.close(fig)
 
         del loss
 
@@ -341,7 +374,7 @@ def validate(test_loader, model, args, epoch):
     model.train(False)
     avg_loss = AverageMeter('Validation Loss', ':.4f')
     
-    for step, (image, spec, bboxes, _) in enumerate(tqdm.tqdm(test_loader, desc='Validating')):
+    for step, (image, spec, bboxes, filename) in enumerate(tqdm.tqdm(test_loader, desc='Validating')):
         if args.gpu is not None:
             spec = spec.cuda(args.gpu, non_blocking=True)
             image = image.cuda(args.gpu, non_blocking=True)
@@ -358,20 +391,31 @@ def validate(test_loader, model, args, epoch):
         avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
         avl_map = avl_map.data.cpu().numpy()
 
-        if args.wandb == 'True' and step == 0:
-            for i in range(2):
-                # Get prediction and ground truth
-                pred = utils.normalize_img(avl_map[i, 0])
-                off_target = utils.normalize_img(avl_map[i, 1])
-            
-                # Create visualization and log to wandb
-                # Inverse normalize using ImageNet mean/std
-                orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
-                orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+        if args.wandb == 'True':
+            # Log visualizations for files listed in args.val_lg_files if present in filename, else fallback to first 2 elements
+            log_indices = []
+            # Check if args has val_lg_files attribute and it's not None/empty
+            if hasattr(args, 'val_log_files') and args.val_log_files:
+                for idx, fname in enumerate(filename):
+                    if any(log_file in fname for log_file in args.val_log_files):
+                        log_indices.append(idx)
+            # If no matches, fallback to first 2 as before
+            # if not log_indices:
+            #     log_indices = range(min(2, len(filename)))
+            if log_indices != []:
+                for i in log_indices:
+                    # Get prediction and ground truth
+                    pred = utils.normalize_img(avl_map[i, 0])
+                    off_target = utils.normalize_img(avl_map[i, 1])
                 
-                fig = create_visualization(orig_img, pred, off_target)
-                wandb.log({f"val/pred_overlay_{step}_{i}": wandb.Image(fig)})
-                plt.close(fig)
+                    # Create visualization and log to wandb
+                    # Inverse normalize using ImageNet mean/std
+                    orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
+                    orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+                    
+                    fig = create_visualization(orig_img, pred, off_target)
+                    wandb.log({f"infer_val/{filename[i]}": wandb.Image(fig)})
+                    plt.close(fig)
 
         # Log current loss
         if args.wandb == 'True':

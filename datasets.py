@@ -149,21 +149,38 @@ def get_train_test_dataset(args):
         pass    # use full dataset
     else:
         subset = set(open(f"metadata/{args.trainset}.txt").read().splitlines())
-        avail_files = total_files.intersection(subset)
-        print(f"{len(avail_files)} valid subset files")
-    avail_files = sorted(list(avail_files))
+        train_data = total_files.intersection(subset)
+        print(f"{len(train_data)} valid subset files")
+    train_data = sorted(list(train_data))
 
     # Get 5000 random files from total_files that are not in avail_files
-    remaining_files = list(total_files - set(avail_files))
+    remaining_files = list(total_files - set(train_data))
     random.shuffle(remaining_files)
     val_data = remaining_files[:5000]
 
     if args.debug == 'True':
-        avail_files = avail_files[:500]
+        train_data = train_data[:500]
         val_data = val_data[:50]
 
-    audio_files_train = sorted([dt+'.wav' for dt in avail_files])
-    image_files_train = sorted([dt+'.jpg' for dt in avail_files])
+    args.train_log_files = ['1ksINuMyHV4_000014', '0kGVS6nRjgA_000091']
+    args.val_log_files = ['7bdDCI8Q3mY_000208', 'WTMrgwvE84o_000000']
+
+    # Ensure train_log_files are in train_data and NOT in val_data
+    for log_file in args.train_log_files:
+        if log_file in val_data:
+            val_data.remove(log_file)
+        if log_file not in train_data:
+            train_data.insert(0, log_file)
+
+    # Ensure val_log_files are in val_data and NOT in train_data
+    for log_file in args.val_log_files:
+        if log_file in train_data:
+            train_data.remove(log_file)
+        if log_file not in val_data:
+            val_data.insert(0, log_file)
+            
+    audio_files_train = sorted([dt+'.wav' for dt in train_data])
+    image_files_train = sorted([dt+'.jpg' for dt in train_data])
 
     audio_files_val = sorted([dt+'.wav' for dt in val_data])
     image_files_val = sorted([dt+'.jpg' for dt in val_data])
@@ -181,9 +198,7 @@ def get_train_test_dataset(args):
         transforms.Normalize(mean=[0.0], std=[12.0])])
     
     image_transform_val = transforms.Compose([
-        transforms.Resize(int(224 * 1.1), Image.BICUBIC),
-        transforms.RandomCrop((224, 224)),
-        transforms.RandomHorizontalFlip(),
+        transforms.Resize((224, 224), Image.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])])

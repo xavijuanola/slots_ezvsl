@@ -1,5 +1,6 @@
 import os
 import json
+from torch import nn
 from torch.optim import *
 import numpy as np
 from sklearn import metrics
@@ -57,10 +58,31 @@ def visualize(raw_image, boxes):
 
     return boxes_img[:, :, ::-1]
 
+def build_param_groups(model, wd=0.01):
+    NORM_TYPES = (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d,
+        nn.BatchNorm3d, nn.GroupNorm, nn.InstanceNorm1d,
+        nn.InstanceNorm2d, nn.InstanceNorm3d)  # añade RMSNorm si la tienes
+    decay, no_decay = [], []
+    for module_name, module in model.named_modules():
+        for pname, p in module.named_parameters(recurse=False):
+            if not p.requires_grad:
+                continue
+            is_norm = isinstance(module, NORM_TYPES)
+            is_bias = pname.endswith("bias")
+            (no_decay if (is_norm or is_bias) else decay).append(p)
+    return [{"params": decay, "weight_decay": wd},
+            {"params": no_decay, "weight_decay": 0.0}]
 
 def build_optimizer_and_scheduler_adam(model, args):
     optimizer_grouped_parameters = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = Adam(optimizer_grouped_parameters, lr=args.init_lr)
+    scheduler = None
+    return optimizer, scheduler
+
+def build_optimizer_and_scheduler_adamW(model, args):
+    param_groups = build_param_groups(model, wd=args.weight_decay)
+    # optimizer_grouped_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    optimizer = AdamW(param_groups, lr=args.init_lr, betas=(0.9, 0.999)) # Better for weight decay
     scheduler = None
     return optimizer, scheduler
 
