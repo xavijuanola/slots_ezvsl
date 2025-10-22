@@ -17,6 +17,7 @@ import utils
 from model import EZVSL
 from losses import compute_loss
 from datasets import get_train_dataset, get_test_dataset, get_train_test_dataset
+from torch.optim.lr_scheduler import LinearLR, ReduceLROnPlateau, SequentialLR
 
 
 def inverse_normalize(tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
@@ -66,9 +67,10 @@ def get_arguments():
 
     # training/evaluation parameters
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
+    parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")
     parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
-    parser.add_argument("--init_lr", type=float, default=0.0001, help="initial learning rate")
+    parser.add_argument("--init_lr", type=float, default=1e-5, help="initial learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="weight decay")
     parser.add_argument("--seed", type=int, default=12345, help="random seed")
     parser.add_argument('--wandb', type=str, default='True', help='use wandb for logging')
@@ -163,7 +165,30 @@ def main_worker(gpu, ngpus_per_node, args):
     # print(model)
 
     # Optimizer
-    optimizer, scheduler = utils.build_optimizer_and_scheduler_adamW(model, args)
+    optimizer, _ = utils.build_optimizer_and_scheduler_adamW(model, args)
+
+    warmup_epochs = 2
+    total_epochs = args.epochs
+
+    # Warmup scheduler
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+
+    # ReduceLROnPlateau scheduler (monitor validation loss)
+    plateau_scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.3,             # how much to reduce LR by
+        patience=5,             # how many epochs to wait before reducing LR
+        min_lr=1e-8,
+        verbose=True
+    )
+
+    # Use warmup scheduler directly (no SequentialLR needed)
+    scheduler = warmup_scheduler
+
+    # Store plateau_scheduler separately for manual stepping after warmup
+    # The main scheduler object is still warmup_scheduler, but store both for use in main training loop
+    # scheduler = SequentialLR(optimizer, [warmup_scheduler], milestones=[warmup_epochs])
 
     # Resume if possible
     start_epoch, best_cIoU, best_Auc = 0, 0., 0.
@@ -172,6 +197,10 @@ def main_worker(gpu, ngpus_per_node, args):
         start_epoch, best_cIoU, best_Auc = ckp['epoch'], ckp['best_cIoU'], ckp['best_Auc']
         model.load_state_dict(ckp['model'])
         optimizer.load_state_dict(ckp['optimizer'])
+        if 'scheduler' in ckp:  # Add this check
+            scheduler.load_state_dict(ckp['scheduler'])
+        if 'plateau_scheduler' in ckp:
+            plateau_scheduler.load_state_dict(ckp['plateau_scheduler'])
         print(f'loaded from {os.path.join(model_dir, "latest.pth")}')
 
     # Dataloaders
@@ -212,18 +241,29 @@ def main_worker(gpu, ngpus_per_node, args):
             train_loader.sampler.set_epoch(epoch)
 
         # Train
-        train(train_loader, model, optimizer, epoch, args)
+        train(train_loader, model, optimizer, scheduler, epoch, args)
+
+        # Step the scheduler after each epoch
+        if epoch < warmup_epochs:
+            # During warmup, step the warmup scheduler
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Warmup epoch {epoch+1}/{warmup_epochs}, Current learning rate: {current_lr:.6f}")
+        else:
+            # After warmup, step the plateau scheduler with validation loss
+            plateau_scheduler.step(loss_info_nce)
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Plateau scheduler epoch {epoch+1}, Current learning rate: {current_lr:.6f}")
 
         # Evaluate
+        print(f'    ----Validation epoch {epoch}----')
         if args.testset == 'vggss_144k':
-            loss_info_nce = validate(test_loader, model, args, start_epoch)
-            print(f'    ----Validation epoch {start_epoch}----')
-            print(f'    Info NCE Loss (epoch {start_epoch}): {loss_info_nce:.4f}')
+            loss_info_nce = validate(test_loader, model, args, epoch)
+            print(f'    Info NCE Loss (epoch {epoch}): {loss_info_nce:.4f}')
         else:
-            cIoU, auc = validate_vggss(test_loader, model, args, start_epoch)
-            print(f'    ----Validation epoch {start_epoch}----')
-            print(f'    cIoU (epoch {start_epoch}): {cIoU:.4f}')
-            print(f'    AUC (epoch {start_epoch}): {auc:.4f}')
+            cIoU, auc = validate_vggss(test_loader, model, args, epoch)
+            print(f'    cIoU (epoch {epoch}): {cIoU:.4f}')
+            print(f'    AUC (epoch {epoch}): {auc:.4f}')
 
         # # Log validation metrics to wandb (only on rank 0)
         # if args.wandb a== 'True':
@@ -246,6 +286,8 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.rank == 0:
             ckp = {'model': model.state_dict(),
                    'optimizer': optimizer.state_dict(),
+                   'scheduler': scheduler.state_dict(),
+                   'plateau_scheduler': plateau_scheduler.state_dict(),  # Add plateau scheduler state
                    'epoch': epoch+1,
                    'best_cIoU': best_cIoU,
                    'best_Auc': best_Auc}
@@ -267,7 +309,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.wandb == 'True' and args.rank == 0:
         wandb.finish()
 
-def train(train_loader, model, optimizer, epoch, args):
+def train(train_loader, model, optimizer, scheduler, epoch, args):
     model.train()
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
@@ -281,9 +323,12 @@ def train(train_loader, model, optimizer, epoch, args):
 
     end = time.time()
     pbar = tqdm.tqdm(train_loader, desc=f'Training epoch {epoch+1}')
+    
+    # Add training step counter
+    train_step = epoch * len(train_loader)  # Start from epoch beginning
+    
     for i, (image, spec, bboxes, filename) in enumerate(pbar):
-        if '0kGVS6nRjgA_000091' in filename:
-            print(filename)
+        B = image.shape[0]
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
@@ -291,7 +336,19 @@ def train(train_loader, model, optimizer, epoch, args):
             image = image.cuda(args.gpu, non_blocking=True)
 
         aud_slot_out, img_slot_out = model(image.float(), spec.float())
+        
+        cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q'], img_slot_out['k']) * (512 ** -0.5)
+        cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
+        h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
+        cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True))
 
+        cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q'], aud_slot_out['k']) * (512 ** -0.5)
+        cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
+        cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True))
+        
+        img_slot_out['cross_attn'] = cross_modal_attention_ai
+        aud_slot_out['cross_attn'] = cross_modal_attention_ia
+            
         loss_info_nce, loss_match, loss_div, loss_recon = compute_loss(img_slot_out, aud_slot_out, args, mode='train')
 
         loss = args.lambda_info_nce * loss_info_nce + args.lambda_match * loss_match + args.lambda_div * loss_div + args.lambda_recon * loss_recon      
@@ -303,9 +360,24 @@ def train(train_loader, model, optimizer, epoch, args):
         avg_div_loss.update(loss_div.item()) 
         avg_recon_loss.update(loss_recon.item())
 
+        # optimizer.zero_grad()
+        # loss.backward()
+        # optimizer.step()
+        
         optimizer.zero_grad()
+        
+        # Check for NaN/Inf in loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"Warning: Invalid loss value {loss.item()} at step {i}")
+            continue
+
         loss.backward()
+
+        # Add gradient clipping - CORRECT placement
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
+        # Remove this line: scheduler.step()  # Step after each batch instead of each epoch
 
         batch_time.update(time.time() - end)
         end = time.time()
@@ -321,17 +393,30 @@ def train(train_loader, model, optimizer, epoch, args):
                     'train/matching_loss': loss_match.item(),
                     'train/divergence_loss': loss_div.item(),
                     'train/reconstruction_loss': loss_recon.item(),
+                    'train/learning_rate': optimizer.param_groups[0]['lr'],  # Add this line
                     'train/epoch': epoch,
-                    'train/step': epoch * len(train_loader) + i
+                    'train/train_step': train_step + i  # Use training-specific step
                 })
             
         # Add visualization logging for specific files
         if args.wandb == 'True':
             # Get attention maps for visualization
             B = image.shape[0]
-            avl_map = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
-            avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
-            avl_map = avl_map.data.cpu().numpy()
+            
+            # Cross-modal attention
+            cross_modal_attention = img_slot_out['cross_attn'].reshape(B, 2, 7, 7)
+            cross_modal_attention = F.interpolate(cross_modal_attention, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            
+            # Intra-modal Attention
+            intra_modal_attention = img_slot_out['intra_attn'].reshape(B, 2, h, w)
+            intra_modal_attention = F.interpolate(intra_modal_attention, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            
+            # Similarity Embeddings
+            img_emb = F.normalize(img_slot_out['embedding_original'].reshape(B, 512, h, w), dim=1)
+            aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
+
+            similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
+            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
             
             # Log visualizations for files listed in args.train_log_files if present in filename
             log_indices = []
@@ -342,19 +427,30 @@ def train(train_loader, model, optimizer, epoch, args):
                         log_indices.append(idx)
             
             if log_indices != []:
-                for idx in log_indices:
+                for i in log_indices:
                     # Get prediction and ground truth
-                    pred = utils.normalize_img(avl_map[idx, 0])
-                    off_target = utils.normalize_img(avl_map[idx, 1])
-                
-                    # Create visualization and log to wandb
-                    # Inverse normalize using ImageNet mean/std
-                    orig_img = inverse_normalize(image[idx]).cpu().permute(1,2,0).numpy()
+                    orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
                     orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+
+                    crossmodal_target = utils.normalize_img(cross_modal_attention[i, 0])
+                    crossmodal_offtarget = utils.normalize_img(cross_modal_attention[i, 1])
+
+                    intra_modal_target = utils.normalize_img(intra_modal_attention[i, 0])
+                    intra_modal_offtarget = utils.normalize_img(intra_modal_attention[i, 1])
+
+                    similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
+                
+                    fig_crossmodal = gen_pred_figure(orig_img, crossmodal_target, crossmodal_offtarget)
+                    wandb.log({f"{filename[i]}_train/crossmodal": wandb.Image(fig_crossmodal)})
+                    plt.close(fig_crossmodal)
                     
-                    fig = create_visualization(orig_img, pred, off_target)
-                    wandb.log({f"infer_train/{filename[idx]}": wandb.Image(fig)})
-                    plt.close(fig)
+                    fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
+                    wandb.log({f"{filename[i]}_train/similarity": wandb.Image(fig_similarity)})
+                    plt.close(fig_similarity)
+                    
+                    fig_intramodal = gen_pred_figure(orig_img, intra_modal_target, intra_modal_offtarget)
+                    wandb.log({f"{filename[i]}_train/intramodal": wandb.Image(fig_intramodal)})
+                    plt.close(fig_crossmodal)
 
         del loss
 
@@ -374,63 +470,98 @@ def validate(test_loader, model, args, epoch):
     model.train(False)
     avg_loss = AverageMeter('Validation Loss', ':.4f')
     
-    for step, (image, spec, bboxes, filename) in enumerate(tqdm.tqdm(test_loader, desc='Validating')):
-        if args.gpu is not None:
-            spec = spec.cuda(args.gpu, non_blocking=True)
-            image = image.cuda(args.gpu, non_blocking=True)
-        
-        B = image.shape[0]
-        
-        aud_slot_out, img_slot_out = model(image.float(), spec.float())
+    with torch.no_grad():
+        for step, (image, spec, bboxes, filename) in enumerate(tqdm.tqdm(test_loader, desc='Validating')):
+            
+            # Add training step counter
+            val_step = epoch * len(test_loader) + step  # Start from epoch beginning
+            if args.gpu is not None:
+                spec = spec.cuda(args.gpu, non_blocking=True)
+                image = image.cuda(args.gpu, non_blocking=True)
+            
+            B = image.shape[0]
+            
+            aud_slot_out, img_slot_out = model(image.float(), spec.float())
 
-        loss_info_nce = compute_loss(img_slot_out, aud_slot_out, args, mode='val')
-        avg_loss.update(loss_info_nce.item())
+            loss_info_nce = compute_loss(img_slot_out, aud_slot_out, args, mode='val')
+            avg_loss.update(loss_info_nce.item())
 
-        avl_map = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
+            # Cross-modal Attention
+            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q'], img_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
+            h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
+            cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).reshape(B, 2, h, w)
+            cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            
+            # Intra-modal Attention
+            intra_modal_attention_i = img_slot_out['intra_attn'].reshape(B, 2, h, w)
+            intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            
+            # Similarity Embeddings
+            img_emb = F.normalize(img_slot_out['embedding_original'].reshape(B, 512, h, w), dim=1)
+            aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
 
-        avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
-        avl_map = avl_map.data.cpu().numpy()
+            similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
+            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            
+            # avl_map = img_slot_out['cross_attn'].reshape(B, 2, 7, 7)
 
-        if args.wandb == 'True':
-            # Log visualizations for files listed in args.val_lg_files if present in filename, else fallback to first 2 elements
-            log_indices = []
-            # Check if args has val_lg_files attribute and it's not None/empty
-            if hasattr(args, 'val_log_files') and args.val_log_files:
-                for idx, fname in enumerate(filename):
-                    if any(log_file in fname for log_file in args.val_log_files):
-                        log_indices.append(idx)
-            # If no matches, fallback to first 2 as before
-            # if not log_indices:
-            #     log_indices = range(min(2, len(filename)))
-            if log_indices != []:
-                for i in log_indices:
-                    # Get prediction and ground truth
-                    pred = utils.normalize_img(avl_map[i, 0])
-                    off_target = utils.normalize_img(avl_map[i, 1])
-                
-                    # Create visualization and log to wandb
-                    # Inverse normalize using ImageNet mean/std
-                    orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
-                    orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+            # avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
+            # avl_map = avl_map.data.cpu().numpy()
+
+            if args.wandb == 'True':
+                # Log visualizations for files listed in args.val_lg_files if present in filename, else fallback to first 2 elements
+                log_indices = []
+                # Check if args has val_lg_files attribute and it's not None/empty
+                if hasattr(args, 'val_log_files') and args.val_log_files:
+                    for idx, fname in enumerate(filename):
+                        if any(log_file in fname for log_file in args.val_log_files):
+                            log_indices.append(idx)
+                # If no matches, fallback to first 2 as before
+                # if not log_indices:
+                #     log_indices = range(min(2, len(filename)))
+                if log_indices != []:
+                    for i in log_indices:
+                        # Get prediction and ground truth
+                        orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
+                        orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+
+                        crossmodal_target = utils.normalize_img(cross_modal_attention_ai[i, 0])
+                        crossmodal_offtarget = utils.normalize_img(cross_modal_attention_ai[i, 1])
+
+                        intra_modal_target = utils.normalize_img(intra_modal_attention_i[i, 0])
+                        intra_modal_offtarget = utils.normalize_img(intra_modal_attention_i[i, 1])
+
+                        similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
                     
-                    fig = create_visualization(orig_img, pred, off_target)
-                    wandb.log({f"infer_val/{filename[i]}": wandb.Image(fig)})
-                    plt.close(fig)
+                        fig_crossmodal = gen_pred_figure(orig_img, crossmodal_target, crossmodal_offtarget)
+                        wandb.log({f"{filename[i]}_val/crossmodal": wandb.Image(fig_crossmodal)})
+                        plt.close(fig_crossmodal)
+                        
+                        fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
+                        wandb.log({f"{filename[i]}_val/similarity": wandb.Image(fig_similarity)})
+                        plt.close(fig_similarity)
+                        
+                        fig_intramodal = gen_pred_figure(orig_img, intra_modal_target, intra_modal_offtarget)
+                        wandb.log({f"{filename[i]}_val/intramodal": wandb.Image(fig_intramodal)})
+                        plt.close(fig_crossmodal)
 
-        # Log current loss
-        if args.wandb == 'True':
+            # Log current loss
+            if args.wandb == 'True':
+                wandb.log({
+                    'val/current_loss': loss_info_nce.item(),
+                    'val/step': val_step,
+                    'val/epoch': epoch  # Use epoch for validation
+                })
+
+        # Log epoch-level validation metrics
+        if args.wandb == 'True' and args.rank == 0:
             wandb.log({
-                'val/current_loss': loss_info_nce.item(),
-                'val/step': step
+                'val/Info NCE Loss': loss_info_nce.item(),
+                'val/avg_loss': avg_loss.avg,
+                'val/epoch': epoch,
+                'val/epoch_step': val_step  # Use epoch as step for validation
             })
-
-    # Log validation metrics to wandb (only on rank 0)
-    if args.wandb == 'True' and args.rank == 0:
-        wandb.log({
-            'val/Info NCE Loss': loss_info_nce.item(),
-            'val/avg_loss': avg_loss.avg,
-            'val/epoch': epoch
-        })
     return loss_info_nce.item()
 
 
@@ -446,7 +577,7 @@ def validate_vggss(test_loader, model, args, epoch):
 
         # loss_info_nce = compute_loss(img_slot_out, aud_slot_out, args, mode='val')
 
-        avl_map = img_slot_out['cross_attn'].contiguous().view(1, 2, 7, 7)
+        avl_map = img_slot_out['cross_attn'].reshape(1, 2, 7, 7)
 
         avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
         avl_map = avl_map.data.cpu().numpy()
@@ -465,7 +596,7 @@ def validate_vggss(test_loader, model, args, epoch):
                     orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
                     orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
                     
-                    fig = create_visualization(orig_img, pred, off_target, gt_map[i])
+                    fig = create_visualization(orig_img, pred, off_target)
                     wandb.log({f"val/pred_overlay_{step}_{i}": wandb.Image(fig)})
                     plt.close(fig)
 
@@ -549,6 +680,28 @@ def create_visualization(image, pred, off_target, gt_map=None):
     ax2.set_title('Off-Target Prediction')
     
     plt.tight_layout()
+    return fig
+
+def gen_pred_figure(orig_img, pred=None, off_target=None):
+    if off_target is not None:
+        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+        axs[0].imshow(orig_img)
+        axs[0].imshow(pred, cmap='jet', alpha=0.5)
+        axs[0].set_title('Prediction')
+        axs[0].axis('off')
+
+        axs[1].imshow(orig_img)
+        axs[1].imshow(off_target, cmap='jet', alpha=0.5)
+        axs[1].set_title('Off-Target')
+        axs[1].axis('off')
+
+        plt.tight_layout()
+    else:
+        fig, axs = plt.subplots(1, 1, figsize=(10, 5))
+        axs.imshow(orig_img)
+        axs.imshow(pred, cmap='jet', alpha=0.5)
+        axs.set_title('Prediction')
+        axs.axis('off')
     return fig
             
 class ProgressMeter(object):

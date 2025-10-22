@@ -8,9 +8,14 @@ class EZVSL(nn.Module):
     def __init__(self, tau, dim, args):
         super(EZVSL, self).__init__()
         self.tau = tau
+        self.args = args
 
+        if self.args.imagenet_pretrain == 'True':
+            pretrained = True
+        else:
+            pretrained = False
         # Vision model
-        self.imgnet = resnet18(pretrained=True)
+        self.imgnet = resnet18(pretrained=pretrained)
         self.imgnet.avgpool = nn.Identity()
         self.imgnet.fc = nn.Identity()
         self.img_conv1d = nn.Conv1d(512, dim, kernel_size=1)
@@ -25,6 +30,9 @@ class EZVSL(nn.Module):
         # self.aud_proj = nn.Linear(512, dim)
 
         # Slot Attention
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, 512)) 
+        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, 512)) 
+        
         self.slot_attention = SlotAttention(
             num_slots=args.num_slots,
             args=args,
@@ -71,12 +79,22 @@ class EZVSL(nn.Module):
         aud_maxpool = aud_temp.clone().max(dim=-1).values # Max-Pooling over temporal dimension
         aud_maxpool = self.aud_conv1d(aud_maxpool.unsqueeze(-1)).squeeze(-1)
         aud_maxpool = nn.functional.normalize(aud_maxpool, dim=1)
+        
+        b, n, d, device, dtype = *aud_temp.shape, aud_temp.device, aud_temp.dtype 
+        
+        mu = self.slots_mu.expand(b, self.args.num_slots, -1) 
+        sigma = self.slots_logsigma.exp().expand(b, self.args.num_slots, -1) 
+        slots = mu + sigma * torch.randn(mu.shape, device = device, dtype = dtype) 
 
         # Slot Attention
-        aud_slot_out, img_slot_out = self.slot_attention(aud_temp.permute(0,2,1), img.permute(0,2,1))
+        img_slot_out = self.slot_attention(img.permute(0,2,1), shared_init_slots=slots)
+        aud_slot_out = self.slot_attention(aud_temp.permute(0,2,1), shared_init_slots=slots)
 
         img_recon = self.img_slot_decoder(img_slot_out['slots'].reshape(img_slot_out['slots'].shape[0], -1))
         aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].reshape(aud_slot_out['slots'].shape[0], -1))
+        
+        aud_slot_out['embedding_original'] = aud_maxpool
+        img_slot_out['embedding_original'] = img
         
         aud_slot_out['emb'] = aud_maxpool
         img_slot_out['emb'] = img_maxpool
@@ -89,6 +107,54 @@ class EZVSL(nn.Module):
 class SlotAttention(nn.Module): 
     def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128, args = None): 
         super().__init__()
+        self.args = args
+        self.dim = dim 
+        self.num_slots = num_slots 
+        self.iters = iters 
+        self.eps = eps 
+        self.scale = dim ** -0.5 
+
+        self.w_q = nn.Linear(dim, dim) 
+        self.w_k = nn.Linear(dim, dim) 
+        self.w_v = nn.Linear(dim, dim) 
+
+        self.gru = nn.GRUCell(dim, dim) 
+        hidden_dim = max(dim, hidden_dim) 
+        
+        self.mlp = nn.Sequential( nn.Linear(dim, hidden_dim), nn.ReLU(inplace = True), nn.Linear(hidden_dim, dim) ) 
+        self.LayerNorm_input = nn.LayerNorm(dim) 
+        self.LayerNorm_slots = nn.LayerNorm(dim) 
+        self.LayerNorm_pre_ff = nn.LayerNorm(dim) 
+        
+    def forward(self, inputs, shared_init_slots = None): 
+        b, n, d, device, dtype = *inputs.shape, inputs.device, inputs.dtype 
+        
+        inputs = self.LayerNorm_input(inputs) 
+        k, v = self.w_k(inputs), self.w_v(inputs) 
+        slots = shared_init_slots.clone()
+        
+        for i in range(self.iters): 
+            slots_prev = slots.clone()
+            slots = self.LayerNorm_slots(slots)  
+            q = self.w_q(slots) 
+            
+            dots = torch.einsum('bid,bjd->bij', q, k) * self.scale 
+            attn_pre_norm = dots.softmax(dim=1) 
+            attn = attn_pre_norm / (attn_pre_norm.sum(dim=-1, keepdim=True) + self.eps )
+            
+            updates = torch.einsum('bjd,bij->bid', v, attn) 
+            
+            slots = self.gru( updates.reshape(-1, d), slots_prev.reshape(-1, d) ) 
+            slots = slots.reshape(b, -1, d) 
+            slots = slots + self.mlp(self.LayerNorm_pre_ff(slots)) 
+
+        slots_data = { 'slots': slots, 'q': q, 'k': k, 'intra_attn': attn } 
+        
+        return slots_data
+
+class SlotAttention2(nn.Module): 
+    def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128, args = None): 
+        super().__init__()        
         self.args = args
         self.dim = dim 
         self.num_slots = num_slots 

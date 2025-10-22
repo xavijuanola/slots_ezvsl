@@ -5,6 +5,8 @@ from torch.optim import *
 import numpy as np
 from sklearn import metrics
 
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
 
 class Evaluator(object):
     def __init__(self):
@@ -90,7 +92,9 @@ def build_optimizer_and_scheduler_adamW(model, args):
 def build_optimizer_and_scheduler_sgd(model, args):
     optimizer_grouped_parameters = model.parameters()
     optimizer = SGD(optimizer_grouped_parameters, lr=args.init_lr)
+    
     scheduler = None
+    
     return optimizer, scheduler
 
 

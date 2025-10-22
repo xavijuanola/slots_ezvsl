@@ -48,7 +48,8 @@ def compute_info_nce_loss(pv, pa, temperature=0.03, exclude_mask=None):
 
     # 2) Logits = cosine similarity / temperature
     logits_v2a = (v @ a.t()) / temperature          # [B, B]
-    logits_a2v = logits_v2a.t().contiguous()  # [B, B]
+    # logits_a2v = logits_v2a.t().contiguous()  # [B, B]
+    logits_a2v = (a @ v.t()) / temperature  # [B, B]
 
     # 3) Optionally exclude false negatives (never exclude diagonal positives)
     if exclude_mask is not None:
