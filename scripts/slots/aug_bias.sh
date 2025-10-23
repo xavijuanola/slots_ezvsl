@@ -1,16 +1,16 @@
 python train.py \
-    --train_data_path /media/y/datasets/vggsound/train \
-    --test_data_path /media/y/datasets/vggsound/train \
+    --train_data_path /ext3/vggsound/train \
+    --test_data_path /ext3/vggsound/train \
     --test_gt_path metadata/vggss_annotations.json \
     --trainset 'vggss_144k' \
     --testset 'vggss_144k' \
     --image_augmentations 'True' \
     --debug 'False' \
     --batch_size 256 \
-    --experiment_name ezvsl_slots \
+    --experiment_name aug_bias \
     --wandb 'True' \
-    --wandb_project 'aug_bias' \
-    --w_bias 'False' \
+    --wandb_project 'ezvsl-slots' \
+    --w_bias 'True' \
     --num_slots 2 \
     --iters 5 \
     --eps 1e-8 \

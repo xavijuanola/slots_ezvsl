@@ -29,6 +29,8 @@
                 "True",
                 "--wandb_project",
                 "ezvsl-slots",
+                "--w_bias",
+                "False",
                 "--num_slots",
                 "2",
                 "--iters",

@@ -186,14 +186,23 @@ def get_train_test_dataset(args):
     image_files_val = sorted([dt+'.jpg' for dt in val_data])
     
     # Transforms
-    image_transform_train = transforms.Compose([
-        transforms.Resize((224, 224), Image.BICUBIC),
-        # transforms.Resize(int(224 * 1.1), Image.BICUBIC),
-        # transforms.RandomCrop((224, 224)),
-        # transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])])
+    if args.image_augmentations == 'True':
+        image_transform_train = transforms.Compose([
+            # transforms.Resize((224, 224), Image.BICUBIC),
+            transforms.Resize(int(224 * 1.1), Image.BICUBIC),
+            transforms.RandomCrop((224, 224)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])]
+            )
+    else:
+        image_transform_train = transforms.Compose([
+            transforms.Resize((224, 224), Image.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])]
+            )
     audio_transform_train = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.0], std=[12.0])])

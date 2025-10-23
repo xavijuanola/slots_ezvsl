@@ -54,6 +54,7 @@ def get_arguments():
     parser.add_argument('--tau', default=0.03, type=float, help='tau')
 
     # slot attention hyper-params
+    parser.add_argument('--w_bias', default='True', type=str, help='whether to use bias in the attention weights')
     parser.add_argument('--num_slots', default=2, type=int)
     parser.add_argument('--iters', default=5, type=int)
     parser.add_argument('--eps', default=1e-8, type=float)
@@ -68,6 +69,7 @@ def get_arguments():
     # training/evaluation parameters
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
     parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
+    parser.add_argument('--image_augmentations', type=str, default='True', help='image augmentations')
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")
     parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
     parser.add_argument("--init_lr", type=float, default=1e-5, help="initial learning rate")
@@ -167,7 +169,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # Optimizer
     optimizer, _ = utils.build_optimizer_and_scheduler_adamW(model, args)
 
-    warmup_epochs = 2
+    warmup_epochs = 0
     total_epochs = args.epochs
 
     # Warmup scheduler
@@ -177,14 +179,14 @@ def main_worker(gpu, ngpus_per_node, args):
     plateau_scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
-        factor=0.3,             # how much to reduce LR by
+        factor=0.5,             # how much to reduce LR by
         patience=5,             # how many epochs to wait before reducing LR
         min_lr=1e-8,
         verbose=True
     )
 
     # Use warmup scheduler directly (no SequentialLR needed)
-    scheduler = warmup_scheduler
+    scheduler = plateau_scheduler
 
     # Store plateau_scheduler separately for manual stepping after warmup
     # The main scheduler object is still warmup_scheduler, but store both for use in main training loop
@@ -373,8 +375,8 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
 
         loss.backward()
 
-        # Add gradient clipping - CORRECT placement
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # Add gradient clipping 
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
         # Remove this line: scheduler.step()  # Step after each batch instead of each epoch
@@ -404,15 +406,15 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             B = image.shape[0]
             
             # Cross-modal attention
-            cross_modal_attention = img_slot_out['cross_attn'].reshape(B, 2, 7, 7)
+            cross_modal_attention = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
             cross_modal_attention = F.interpolate(cross_modal_attention, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
             
             # Intra-modal Attention
-            intra_modal_attention = img_slot_out['intra_attn'].reshape(B, 2, h, w)
+            intra_modal_attention = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
             intra_modal_attention = F.interpolate(intra_modal_attention, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
             
             # Similarity Embeddings
-            img_emb = F.normalize(img_slot_out['embedding_original'].reshape(B, 512, h, w), dim=1)
+            img_emb = F.normalize(img_slot_out['embedding_original'].contiguous().view(B, 512, h, w), dim=1)
             aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
 
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
@@ -490,15 +492,15 @@ def validate(test_loader, model, args, epoch):
             cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q'], img_slot_out['k']) * (512 ** -0.5)
             cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
             h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
-            cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).reshape(B, 2, h, w)
+            cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).contiguous().view(B, 2, h, w)
             cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
             
             # Intra-modal Attention
-            intra_modal_attention_i = img_slot_out['intra_attn'].reshape(B, 2, h, w)
+            intra_modal_attention_i = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
             intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
             
             # Similarity Embeddings
-            img_emb = F.normalize(img_slot_out['embedding_original'].reshape(B, 512, h, w), dim=1)
+            img_emb = F.normalize(img_slot_out['embedding_original'].contiguous().view(B, 512, h, w), dim=1)
             aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
 
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)

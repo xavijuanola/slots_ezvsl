@@ -90,8 +90,8 @@ class EZVSL(nn.Module):
         img_slot_out = self.slot_attention(img.permute(0,2,1), shared_init_slots=slots)
         aud_slot_out = self.slot_attention(aud_temp.permute(0,2,1), shared_init_slots=slots)
 
-        img_recon = self.img_slot_decoder(img_slot_out['slots'].reshape(img_slot_out['slots'].shape[0], -1))
-        aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].reshape(aud_slot_out['slots'].shape[0], -1))
+        img_recon = self.img_slot_decoder(img_slot_out['slots'].contiguous().view((img_slot_out['slots'].shape[0], -1)))
+        aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].contiguous().view((aud_slot_out['slots'].shape[0], -1)))
         
         aud_slot_out['embedding_original'] = aud_maxpool
         img_slot_out['embedding_original'] = img
@@ -114,9 +114,9 @@ class SlotAttention(nn.Module):
         self.eps = eps 
         self.scale = dim ** -0.5 
 
-        self.w_q = nn.Linear(dim, dim) 
-        self.w_k = nn.Linear(dim, dim) 
-        self.w_v = nn.Linear(dim, dim) 
+        self.w_q = nn.Linear(dim, dim, bias=(self.args.w_bias == 'True')) 
+        self.w_k = nn.Linear(dim, dim, bias=(self.args.w_bias == 'True')) 
+        self.w_v = nn.Linear(dim, dim, bias=(self.args.w_bias == 'True')) 
 
         self.gru = nn.GRUCell(dim, dim) 
         hidden_dim = max(dim, hidden_dim) 
@@ -145,8 +145,8 @@ class SlotAttention(nn.Module):
             updates = torch.einsum('bjd,bij->bid', v, attn) 
             
             slots = self.gru( updates.reshape(-1, d), slots_prev.reshape(-1, d) ) 
-            slots = slots.reshape(b, -1, d) 
             slots = slots + self.mlp(self.LayerNorm_pre_ff(slots)) 
+            slots = slots.reshape(b, -1, d) 
 
         slots_data = { 'slots': slots, 'q': q, 'k': k, 'intra_attn': attn } 
         
