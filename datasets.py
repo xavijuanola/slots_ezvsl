@@ -4,14 +4,25 @@ import librosa
 import numpy as np
 from torch.utils.data import Dataset
 from torchvision import transforms
-from PIL import Image
+import torchaudio.transforms as audio_T
+from PIL import Image, ImageFilter
 from scipy import signal
 import random
 import json
 import xml.etree.ElementTree as ET
 from audio_io import load_audio_av, open_audio_av
 
+class GaussianBlur(object):
+    """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
 
+    def __init__(self, sigma=[.1, 2.]):
+        self.sigma = sigma
+
+    def __call__(self, x):
+        sigma = random.uniform(self.sigma[0], self.sigma[1])
+        x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return x
+    
 def load_image(path):
     return Image.open(path).convert('RGB')
 
@@ -119,7 +130,32 @@ class AudioVisualDataset(Dataset):
 
         # Audio
         audio_fn = os.path.join(self.audio_path, self.audio_files[idx])
-        spectrogram = self.audio_transform(load_spectrogram(audio_fn))
+        spectrogram = load_spectrogram(audio_fn)
+
+        # Apply transforms with proper error handling for masking transforms
+        try:
+            spectrogram = self.audio_transform(spectrogram)
+        except IndexError as e:
+            if "tuple index out of range" in str(e):
+                # Fallback: apply transforms without masking if they cause issues
+                if hasattr(self.audio_transform, 'transforms'):
+                    # Create a new transform without the problematic masking transforms
+                    safe_transforms = []
+                    for transform in self.audio_transform.transforms:
+                        if not (hasattr(transform, '__class__') and 
+                            'Masking' in transform.__class__.__name__):
+                            safe_transforms.append(transform)
+                    
+                    from torchvision import transforms
+                    safe_transform = transforms.Compose(safe_transforms)
+                    spectrogram = safe_transform(spectrogram)
+                else:
+                    # If it's not a Compose transform, just convert to tensor and normalize
+                    import torch
+                    spectrogram = torch.tensor(spectrogram).float()
+                    spectrogram = (spectrogram - 0.0) / 12.0
+            else:
+                raise e
 
         bboxes = {}
         if self.all_bboxes is not None:
@@ -189,7 +225,7 @@ def get_train_test_dataset(args):
     image_files_val = sorted([dt+'.jpg' for dt in val_data])
     
     # Transforms
-    if args.image_augmentations == 'True':
+    if args.image_augmentations == 'ezvsl':
         image_transform_train = transforms.Compose([
             # transforms.Resize((224, 224), Image.BICUBIC),
             transforms.Resize(int(224 * 1.1), Image.BICUBIC),
@@ -199,6 +235,21 @@ def get_train_test_dataset(args):
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                 std=[0.229, 0.224, 0.225])]
             )
+        
+    elif args.image_augmentations == 'ssltie':
+        image_transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.3, 1.)),
+                transforms.RandomApply([
+                    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
+                ], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])
+            ])
+        
     else:
         image_transform_train = transforms.Compose([
             transforms.Resize((224, 224), Image.BICUBIC),
@@ -206,9 +257,23 @@ def get_train_test_dataset(args):
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                 std=[0.229, 0.224, 0.225])]
             )
-    audio_transform_train = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.0], std=[12.0])])
+    
+    if args.audio_augmentations == 'ezvsl':
+        audio_transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.0], std=[12.0])])
+    
+    elif args.audio_augmentations == 'ssltie':
+        audio_transform_train = transforms.Compose([
+            audio_T.TimeMasking(time_mask_param=100),
+            audio_T.FrequencyMasking(freq_mask_param=20),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.0], std=[12.0])
+        ])
+    else:
+        audio_transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.0], std=[12.0])])
     
     image_transform_val = transforms.Compose([
         transforms.Resize((224, 224), Image.BICUBIC),

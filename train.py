@@ -69,7 +69,8 @@ def get_arguments():
     # training/evaluation parameters
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
     parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
-    parser.add_argument('--image_augmentations', type=str, default='True', help='image augmentations')
+    parser.add_argument('--image_augmentations', type=str, default='ssltie', help='["No", "ssltie", "ezvsl"]')
+    parser.add_argument('--audio_augmentations', type=str, default='ssltie', help='["No", "ssltie"]')
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")
     parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
     parser.add_argument("--init_lr", type=float, default=1e-5, help="initial learning rate")
