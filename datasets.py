@@ -106,10 +106,13 @@ class AudioVisualDataset(Dataset):
     def getitem(self, idx):
         file = self.image_files[idx]
         file_id = file.split('.')[0]
+        
+        num_frames = len(os.listdir(os.path.join(self.image_path, file_id)))
+        half_frame = str(num_frames // 2).zfill(3)
 
         # Image
         if self.mode == 'train':
-            img_fn = os.path.join(self.image_path, self.image_files[idx].split('.')[0], '125.jpg')
+            img_fn = os.path.join(self.image_path, self.image_files[idx].split('.')[0], f'{half_frame}.jpg')
         else:    
             img_fn = os.path.join(self.image_path, self.image_files[idx])
         frame = self.image_transform(load_image(img_fn))
