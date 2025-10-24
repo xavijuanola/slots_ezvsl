@@ -55,6 +55,7 @@ def get_arguments():
 
     # slot attention hyper-params
     parser.add_argument('--w_bias', default='True', type=str, help='whether to use bias in the attention weights')
+    parser.add_argument('--n_attention_modules', default=2, type=int, help='number of attention modules')
     parser.add_argument('--num_slots', default=2, type=int)
     parser.add_argument('--iters', default=5, type=int)
     parser.add_argument('--eps', default=1e-8, type=float)
@@ -365,10 +366,10 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
 
         # Update running averages
         avg_total_loss.update(loss.item())
-        avg_info_nce_loss.update(loss_info_nce.item())
-        avg_match_loss.update(loss_match.item())
-        avg_div_loss.update(loss_div.item()) 
-        avg_recon_loss.update(loss_recon.item())
+        avg_info_nce_loss.update(args.lambda_info_nce * loss_info_nce.item())
+        avg_match_loss.update(args.lambda_match * loss_match.item())
+        avg_div_loss.update(args.lambda_div * loss_div.item()) 
+        avg_recon_loss.update(args.lambda_recon * loss_recon.item())
 
         # optimizer.zero_grad()
         # loss.backward()
@@ -415,14 +416,14 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             
             # Cross-modal attention
             cross_modal_attention_image = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
-            cross_modal_attention_image = F.interpolate(cross_modal_attention_image, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            cross_modal_attention_image = F.interpolate(cross_modal_attention_image, size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
             
             cross_modal_attention_audio = aud_slot_out['cross_attn'].contiguous().view(B, 2, 7)
             cross_modal_attention_audio = F.interpolate(cross_modal_attention_audio, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Intra-modal Attention
             intra_modal_attention_image = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
-            intra_modal_attention_image = F.interpolate(intra_modal_attention_image, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            intra_modal_attention_image = F.interpolate(intra_modal_attention_image, size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
 
             intra_modal_attention_audio = aud_slot_out['intra_attn'].contiguous().view(B, 2, 7)
             intra_modal_attention_audio = F.interpolate(intra_modal_attention_audio, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
@@ -432,7 +433,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
 
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
-            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
             
             # Log visualizations for files listed in args.train_log_files if present in filename
             log_indices = []
@@ -535,7 +536,7 @@ def validate(test_loader, model, args, epoch):
             cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
             h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
             cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).contiguous().view(B, 2, h, w)
-            cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
             cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q'], aud_slot_out['k']) * (512 ** -0.5)
             cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
@@ -544,7 +545,7 @@ def validate(test_loader, model, args, epoch):
             
             # Intra-modal Attention
             intra_modal_attention_i = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
-            intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
             intra_modal_attention_a = aud_slot_out['intra_attn'].contiguous().view(B, 2, 7)
             intra_modal_attention_a = F.interpolate(intra_modal_attention_a, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
@@ -554,11 +555,11 @@ def validate(test_loader, model, args, epoch):
             aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
 
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
-            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
             # avl_map = img_slot_out['cross_attn'].reshape(B, 2, 7, 7)
 
-            # avl_map = F.interpolate(avl_map, size=(224, 224), mode='bicubic', align_corners=False)
+            # avl_map = F.interpolate(avl_map, size=(224, 224), mode='bilinear', align_corners=False)
             # avl_map = avl_map.data.cpu().numpy()
 
             if args.wandb == 'True':

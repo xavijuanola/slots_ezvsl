@@ -33,14 +33,32 @@ class EZVSL(nn.Module):
         self.slots_mu = nn.Parameter(torch.randn(1, 1, 512)) 
         self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, 512)) 
         
-        self.slot_attention = SlotAttention(
-            num_slots=args.num_slots,
-            args=args,
-            dim=dim,
-            iters = args.iters,
-            eps = args.eps, 
-            hidden_dim = args.hidden_dim
-        )
+        if self.args.n_attention_modules == 1:
+            self.slot_attention = SlotAttention(
+                num_slots=args.num_slots,
+                args=args,
+                dim=dim,
+                iters = args.iters,
+                eps = args.eps, 
+                hidden_dim = args.hidden_dim
+            )
+        else:
+            self.image_slot_attention = SlotAttention(
+                num_slots=args.num_slots,
+                args=args,
+                dim=dim,
+                iters = args.iters,
+                eps = args.eps, 
+                hidden_dim = args.hidden_dim
+            )
+            self.audio_slot_attention = SlotAttention(
+                num_slots=args.num_slots,
+                args=args,
+                dim=dim,
+                iters = args.iters,
+                eps = args.eps, 
+                hidden_dim = args.hidden_dim
+            )
 
         self.img_slot_decoder = SlotDecoder(slot_dim=1024, hidden_dim=dim)
         self.aud_slot_decoder = SlotDecoder(slot_dim=1024, hidden_dim=dim)
@@ -87,8 +105,12 @@ class EZVSL(nn.Module):
         slots = mu + sigma * torch.randn(mu.shape, device = device, dtype = dtype) 
 
         # Slot Attention
-        img_slot_out = self.slot_attention(img.permute(0,2,1), shared_init_slots=slots)
-        aud_slot_out = self.slot_attention(aud_temp.permute(0,2,1), shared_init_slots=slots)
+        if self.args.n_attention_modules == 1:
+            img_slot_out = self.slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots)
+            aud_slot_out = self.slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots)
+        else:
+            img_slot_out = self.image_slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots)
+            aud_slot_out = self.audio_slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots)
 
         img_recon = self.img_slot_decoder(img_slot_out['slots'].contiguous().view((img_slot_out['slots'].shape[0], -1)))
         aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].contiguous().view((aud_slot_out['slots'].shape[0], -1)))
