@@ -9,6 +9,7 @@ python train.py \
     --wandb 'True' \
     --wandb_project 'ezvsl-slots' \
     --num_slots 2 \
+    --n_attention_modules 1 \
     --iters 5 \
     --eps 1e-8 \
     --hidden_dim 512 \
