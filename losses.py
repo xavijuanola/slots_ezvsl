@@ -48,8 +48,8 @@ def compute_info_nce_loss(pv, pa, temperature=0.03, exclude_mask=None):
 
     # 2) Logits = cosine similarity / temperature
     logits_v2a = (v @ a.t()) / temperature          # [B, B]
-    # logits_a2v = logits_v2a.t().contiguous()  # [B, B]
-    logits_a2v = (a @ v.t()) / temperature  # [B, B]
+    logits_a2v = logits_v2a.t().contiguous()  # [B, B]
+    # logits_a2v = (a @ v.t()) / temperature  # [B, B]
 
     # 3) Optionally exclude false negatives (never exclude diagonal positives)
     if exclude_mask is not None:
@@ -67,6 +67,7 @@ def compute_info_nce_loss(pv, pa, temperature=0.03, exclude_mask=None):
     loss_v2a = F.cross_entropy(logits_v2a, labels)
     loss_a2v = F.cross_entropy(logits_a2v, labels)
     return 0.5 * (loss_v2a + loss_a2v)
+    # return loss_v2a
 
 def compute_divergence_loss(img_target_slot, img_offtarget_slot, aud_target_slot, aud_offtarget_slot):
     # Normalize slots for cosine similarity

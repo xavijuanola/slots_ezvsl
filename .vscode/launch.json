@@ -23,6 +23,8 @@
                 "metadata/vggss_annotations.json",
                 "--experiment_name",
                 "ezvsl_slots",
+                "--imagenet_pretrain",
+                "False",
                 "--image_augmentations",
                 "ssltie",
                 "--audio_augmentations",
@@ -48,7 +50,11 @@
                 "--lambda_info_nce",
                 "1.0",
                 "--lambda_match",
-                "100.0"
+                "0.0",
+                "--lambda_recon",
+                "0.1",
+                "--lambda_div",
+                "0.0",
             ]
         }
     ]

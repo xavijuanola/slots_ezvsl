@@ -141,11 +141,18 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Initialize wandb (only on rank 0)
     if args.wandb == 'True':
-        wandb.init(
-            project=args.wandb_project,
-            name=args.experiment_name,
-            config=vars(args)
-        )
+        if args.debug == 'True':
+            wandb.init(
+                project=f'{args.wandb_project}_debug',
+                name=f'{args.experiment_name}_debug',
+                config=vars(args)
+            )
+        else:
+            wandb.init(
+                project=args.wandb_project,
+                name=args.experiment_name,
+                config=vars(args)
+            )
 
     # Create model
     model = EZVSL(args.tau, args.out_dim, args)
@@ -407,12 +414,18 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             B = image.shape[0]
             
             # Cross-modal attention
-            cross_modal_attention = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
-            cross_modal_attention = F.interpolate(cross_modal_attention, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            cross_modal_attention_image = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
+            cross_modal_attention_image = F.interpolate(cross_modal_attention_image, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            
+            cross_modal_attention_audio = aud_slot_out['cross_attn'].contiguous().view(B, 2, 7)
+            cross_modal_attention_audio = F.interpolate(cross_modal_attention_audio, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Intra-modal Attention
-            intra_modal_attention = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
-            intra_modal_attention = F.interpolate(intra_modal_attention, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+            intra_modal_attention_image = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
+            intra_modal_attention_image = F.interpolate(intra_modal_attention_image, size=(224, 224), mode='bicubic', align_corners=False).data.cpu().numpy()
+
+            intra_modal_attention_audio = aud_slot_out['intra_attn'].contiguous().view(B, 2, 7)
+            intra_modal_attention_audio = F.interpolate(intra_modal_attention_audio, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Similarity Embeddings
             img_emb = F.normalize(img_slot_out['embedding_original'].contiguous().view(B, 512, h, w), dim=1)
@@ -434,26 +447,54 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
                     # Get prediction and ground truth
                     orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
                     orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+                    
+                    orig_spec = spec[i,0].data.cpu().numpy()
+                    # orig_spec = inverse_normalize(spec[i]).cpu().permute(1,2,0).numpy()
+                    # orig_spec = np.clip(orig_spec, 0, 1)  # Clip to valid range
 
-                    crossmodal_target = utils.normalize_img(cross_modal_attention[i, 0])
-                    crossmodal_offtarget = utils.normalize_img(cross_modal_attention[i, 1])
-
-                    intra_modal_target = utils.normalize_img(intra_modal_attention[i, 0])
-                    intra_modal_offtarget = utils.normalize_img(intra_modal_attention[i, 1])
-
+                    # Image logs
                     similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
-                
-                    fig_crossmodal = gen_pred_figure(orig_img, crossmodal_target, crossmodal_offtarget)
-                    wandb.log({f"{filename[i]}_train/crossmodal": wandb.Image(fig_crossmodal)})
-                    plt.close(fig_crossmodal)
                     
                     fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
                     wandb.log({f"{filename[i]}_train/similarity": wandb.Image(fig_similarity)})
                     plt.close(fig_similarity)
                     
-                    fig_intramodal = gen_pred_figure(orig_img, intra_modal_target, intra_modal_offtarget)
-                    wandb.log({f"{filename[i]}_train/intramodal": wandb.Image(fig_intramodal)})
-                    plt.close(fig_crossmodal)
+                    intra_modal_image_target = utils.normalize_img(intra_modal_attention_image[i, 0])
+                    intra_modal_image_offtarget = utils.normalize_img(intra_modal_attention_image[i, 1])
+                    
+                    fig_intramodal = gen_pred_figure(orig_img, intra_modal_image_target, intra_modal_image_offtarget)
+                    wandb.log({f"{filename[i]}_train/intramodal_image": wandb.Image(fig_intramodal)})
+                    plt.close(fig_intramodal)
+                    
+                    crossmodal_image_target = utils.normalize_img(cross_modal_attention_image[i, 0])
+                    crossmodal_image_offtarget = utils.normalize_img(cross_modal_attention_image[i, 1])
+                    
+                    fig_crossmodal_image = gen_pred_figure(orig_img, crossmodal_image_target, crossmodal_image_offtarget)
+                    wandb.log({f"{filename[i]}_train/crossmodal_image": wandb.Image(fig_crossmodal_image)})
+                    plt.close(fig_crossmodal_image)
+                    
+                    # Audio logs
+                    fig_spectrogram = plt.figure(figsize=(10, 5))
+                    ax = fig_spectrogram.add_subplot(111)
+                    ax.imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
+                    ax.set_title('Spectrogram')
+                    ax.axis('off')
+                    wandb.log({f"{filename[i]}_train/spectrogram": wandb.Image(fig_spectrogram)})
+                    plt.close(fig_spectrogram)
+                    
+                    intra_modal_audio_target = utils.normalize_img(intra_modal_attention_audio[i, 0])
+                    intra_modal_audio_offtarget = utils.normalize_img(intra_modal_attention_audio[i, 1])
+                    
+                    fig_intramodal_audio = gen_spec_pred_figure(orig_spec, intra_modal_audio_target, intra_modal_audio_offtarget)
+                    wandb.log({f"{filename[i]}_train/intramodal_audio": wandb.Image(fig_intramodal_audio)})
+                    plt.close(fig_intramodal_audio)                    
+                    
+                    crossmodal_audio_target = utils.normalize_img(cross_modal_attention_audio[i, 0])
+                    crossmodal_audio_offtarget = utils.normalize_img(cross_modal_attention_audio[i, 1])
+                    
+                    fig_crossmodal_audio = gen_spec_pred_figure(orig_spec, crossmodal_audio_target, crossmodal_audio_offtarget)
+                    wandb.log({f"{filename[i]}_train/crossmodal_audio": wandb.Image(fig_crossmodal_audio)})
+                    plt.close(fig_crossmodal_audio)
 
         del loss
 
@@ -496,9 +537,17 @@ def validate(test_loader, model, args, epoch):
             cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).contiguous().view(B, 2, h, w)
             cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
             
+            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q'], aud_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
+            cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True)).contiguous()
+            cross_modal_attention_ia = F.interpolate(cross_modal_attention_ia, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
+            
             # Intra-modal Attention
             intra_modal_attention_i = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
             intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bicubic', align_corners=False).cpu().numpy()
+            
+            intra_modal_attention_a = aud_slot_out['intra_attn'].contiguous().view(B, 2, 7)
+            intra_modal_attention_a = F.interpolate(intra_modal_attention_a, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Similarity Embeddings
             img_emb = F.normalize(img_slot_out['embedding_original'].contiguous().view(B, 512, h, w), dim=1)
@@ -529,26 +578,54 @@ def validate(test_loader, model, args, epoch):
                         orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
                         orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
 
-                        crossmodal_target = utils.normalize_img(cross_modal_attention_ai[i, 0])
-                        crossmodal_offtarget = utils.normalize_img(cross_modal_attention_ai[i, 1])
-
-                        intra_modal_target = utils.normalize_img(intra_modal_attention_i[i, 0])
-                        intra_modal_offtarget = utils.normalize_img(intra_modal_attention_i[i, 1])
-
-                        similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
+                        orig_spec = spec[i,0].data.cpu().numpy()
+                        # orig_spec = inverse_normalize(spec[i]).cpu().permute(1,2,0).numpy()
+                        # orig_spec = np.clip(orig_spec, 0, 1)  # Clip to valid range
                     
-                        fig_crossmodal = gen_pred_figure(orig_img, crossmodal_target, crossmodal_offtarget)
-                        wandb.log({f"{filename[i]}_val/crossmodal": wandb.Image(fig_crossmodal)})
-                        plt.close(fig_crossmodal)
+                        # Image logs
+                        similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
                         
                         fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
                         wandb.log({f"{filename[i]}_val/similarity": wandb.Image(fig_similarity)})
                         plt.close(fig_similarity)
                         
-                        fig_intramodal = gen_pred_figure(orig_img, intra_modal_target, intra_modal_offtarget)
-                        wandb.log({f"{filename[i]}_val/intramodal": wandb.Image(fig_intramodal)})
-                        plt.close(fig_crossmodal)
-
+                        intra_modal_image_target = utils.normalize_img(intra_modal_attention_i[i, 0])
+                        intra_modal_image_offtarget = utils.normalize_img(intra_modal_attention_i[i, 1])
+                        
+                        fig_intramodal_image = gen_pred_figure(orig_img, intra_modal_image_target, intra_modal_image_offtarget)
+                        wandb.log({f"{filename[i]}_val/intramodal_image": wandb.Image(fig_intramodal_image)})
+                        plt.close(fig_intramodal_image)
+                        
+                        crossmodal_image_target = utils.normalize_img(cross_modal_attention_ai[i, 0])
+                        crossmodal_image_offtarget = utils.normalize_img(cross_modal_attention_ai[i, 1])
+                        
+                        fig_crossmodal_image = gen_pred_figure(orig_img, crossmodal_image_target, crossmodal_image_offtarget)
+                        wandb.log({f"{filename[i]}_val/crossmodal_image": wandb.Image(fig_crossmodal_image)})
+                        plt.close(fig_crossmodal_image)
+                        
+                        # Audio logs
+                        fig_spectrogram = plt.figure(figsize=(10, 5))
+                        ax = fig_spectrogram.add_subplot(111)
+                        ax.imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
+                        ax.set_title('Spectrogram')
+                        ax.axis('off')
+                        wandb.log({f"{filename[i]}_val/spectrogram": wandb.Image(fig_spectrogram)})
+                        plt.close(fig_spectrogram)
+                        
+                        intra_modal_audio_target = utils.normalize_img(intra_modal_attention_a[i, 0])
+                        intra_modal_audio_offtarget = utils.normalize_img(intra_modal_attention_a[i, 1])
+                        
+                        fig_intramodal_audio = gen_spec_pred_figure(orig_spec, intra_modal_audio_target, intra_modal_audio_offtarget)
+                        wandb.log({f"{filename[i]}_val/intramodal_audio": wandb.Image(fig_intramodal_audio)})
+                        plt.close(fig_intramodal_audio)
+                        
+                        crossmodal_audio_target = utils.normalize_img(cross_modal_attention_ia[i, 0])
+                        crossmodal_audio_offtarget = utils.normalize_img(cross_modal_attention_ia[i, 1])
+                        
+                        fig_crossmodal_audio = gen_spec_pred_figure(orig_spec, crossmodal_audio_target, crossmodal_audio_offtarget)
+                        wandb.log({f"{filename[i]}_val/crossmodal_audio": wandb.Image(fig_crossmodal_audio)})
+                        plt.close(fig_crossmodal_audio)
+                        
             # Log current loss
             if args.wandb == 'True':
                 wandb.log({
@@ -684,6 +761,47 @@ def create_visualization(image, pred, off_target, gt_map=None):
     
     plt.tight_layout()
     return fig
+
+def gen_spec_pred_figure(orig_spec, pred=None, off_target=None):
+    """
+    Create a visualization with 3 subfigures (vertically stacked):
+      - 1st: original spectrogram
+      - 2nd: target overlayed on spectrogram
+      - 3rd: off-target overlayed on spectrogram
+
+    Args:
+        orig_spec (ndarray): Original spectrogram (H,W,3 or H,W)
+        pred (ndarray): Prediction heatmap (H,W)
+        off_target (ndarray): Off-target heatmap (H,W)
+    Returns:
+        fig (matplotlib.figure.Figure): The resulting Figure object
+    """
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(3, 1, figsize=(24, 10))
+
+    # Row 1: original spectrogram
+    axs[0].imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
+    axs[0].set_title('Spectrogram')
+    axs[0].axis('off')
+
+    # Row 2: target overlay
+    axs[1].imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
+    if pred is not None:
+        axs[1].imshow(pred, cmap='jet', alpha=0.8, aspect='auto', origin='lower')
+    axs[1].set_title('Target Prediction Overlay')
+    axs[1].axis('off')
+
+    # Row 3: off-target overlay
+    axs[2].imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
+    if off_target is not None:
+        axs[2].imshow(off_target, cmap='jet', alpha=0.8, aspect='auto', origin='lower')
+    axs[2].set_title('Off-Target Overlay')
+    axs[2].axis('off')
+
+    plt.tight_layout()
+    return fig
+
 
 def gen_pred_figure(orig_img, pred=None, off_target=None):
     if off_target is not None:
