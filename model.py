@@ -31,8 +31,8 @@ class EZVSL(nn.Module):
         # self.aud_proj = nn.Linear(512, dim)
 
         # Slot Attention
-        self.slots_mu = nn.Parameter(torch.randn(1, 1, 512)) 
-        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, 512)) 
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, dim)) 
+        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, dim)) 
         
         if self.args.n_attention_modules == 1:
             self.slot_attention = SlotAttention(
@@ -48,7 +48,8 @@ class EZVSL(nn.Module):
                 self.image_slot_attention = SlotAttention(
                     num_slots=args.num_slots,
                     args=args,
-                    dim=dim,
+                    dim_in=512,
+                    dim_out=dim,
                     iters = args.iters,
                     eps = args.eps, 
                     hidden_dim = args.hidden_dim
@@ -58,7 +59,8 @@ class EZVSL(nn.Module):
                 self.image_slot_attention = SlotAttention(
                     num_slots=args.num_slots,
                     args=args,
-                    dim=dim,
+                    dim_in=512,
+                    dim_out=dim,
                     iters = args.iters,
                     eps = args.eps, 
                     hidden_dim = args.hidden_dim
@@ -66,14 +68,15 @@ class EZVSL(nn.Module):
                 self.audio_slot_attention = SlotAttention(
                     num_slots=args.num_slots,
                     args=args,
-                    dim=dim,
+                    dim_in=512,
+                    dim_out=dim,
                     iters = args.iters,
                     eps = args.eps, 
                     hidden_dim = args.hidden_dim
                 )
 
-        self.img_slot_decoder = SlotDecoder(slot_dim=1024, hidden_dim=dim)
-        self.aud_slot_decoder = SlotDecoder(slot_dim=1024, hidden_dim=dim)
+        self.img_slot_decoder = SlotDecoder(slot_dim=args.num_slots * dim, hidden_dim=dim)
+        self.aud_slot_decoder = SlotDecoder(slot_dim=args.num_slots * dim, hidden_dim=dim)
                 
         # Initialize weights (except pretrained visual model)
         for net in [self.audnet, self.img_conv1d, self.aud_conv1d]:
@@ -106,9 +109,9 @@ class EZVSL(nn.Module):
         # Audio
         aud = self.audnet(audio).unflatten(1, (512, 9, 7))
         aud_temp = aud.clone().max(dim=2).values # Max-Pooling over frequency dimension
-        aud_maxpool = aud_temp.clone().max(dim=-1).values # Max-Pooling over temporal dimension
-        aud_maxpool = self.aud_conv1d(aud_maxpool.unsqueeze(-1)).squeeze(-1)
-        aud_maxpool = nn.functional.normalize(aud_maxpool, dim=1)
+        aud_pool = aud_temp.clone().max(dim=-1).values # Max-Pooling over temporal dimension
+        aud_pool_proj = self.aud_conv1d(aud_pool.unsqueeze(-1)).squeeze(-1)
+        aud_pool_proj = nn.functional.normalize(aud_pool_proj, dim=1)
         
         b, n, d, device, dtype = *aud_temp.shape, aud_temp.device, aud_temp.dtype 
         
@@ -127,10 +130,10 @@ class EZVSL(nn.Module):
         img_recon = self.img_slot_decoder(img_slot_out['slots'].contiguous().view((img_slot_out['slots'].shape[0], -1)))
         aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].contiguous().view((aud_slot_out['slots'].shape[0], -1)))
         
-        aud_slot_out['embedding_original'] = aud_maxpool
+        aud_slot_out['embedding_original'] = aud_pool
         img_slot_out['embedding_original'] = img
         
-        aud_slot_out['emb'] = aud_maxpool
+        aud_slot_out['emb'] = aud_pool_proj
         img_slot_out['emb'] = img_maxpool
 
         aud_slot_out['emb_rec'] = aud_recon
@@ -139,26 +142,30 @@ class EZVSL(nn.Module):
         return aud_slot_out, img_slot_out
 
 class SlotAttention(nn.Module): 
-    def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128, args = None): 
+    def __init__(self, num_slots, dim_in, dim_out, iters = 3, eps = 1e-8, hidden_dim = 128, args = None): 
         super().__init__()
         self.args = args
-        self.dim = dim 
+        self.dim_in = dim_in
+        self.dim_out = dim_out
         self.num_slots = num_slots 
         self.iters = iters 
         self.eps = eps 
-        self.scale = dim ** -0.5 
+        self.scale = dim_out ** -0.5 
 
-        self.w_q = nn.Linear(dim, dim, bias=(self.args.w_bias == 'True')) 
-        self.w_k = nn.Linear(dim, dim, bias=(self.args.w_bias == 'True')) 
-        self.w_v = nn.Linear(dim, dim, bias=(self.args.w_bias == 'True')) 
+        self.w_q = nn.Linear(dim_out, dim_out, bias=(self.args.w_bias == 'True')) 
+        self.w_k = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
+        self.w_v = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
 
-        self.gru = nn.GRUCell(dim, dim) 
-        hidden_dim = max(dim, hidden_dim) 
-        
-        self.mlp = nn.Sequential( nn.Linear(dim, hidden_dim), nn.ReLU(inplace = True), nn.Linear(hidden_dim, dim) ) 
-        self.LayerNorm_input = nn.LayerNorm(dim) 
-        self.LayerNorm_slots = nn.LayerNorm(dim) 
-        self.LayerNorm_pre_ff = nn.LayerNorm(dim) 
+        if self.args.add_gru == 'True':
+            self.gru = nn.GRUCell(dim_out, dim_out) 
+            
+        if self.args.add_mlp == 'True':
+            hidden_dim = max(dim_out, hidden_dim) 
+            self.mlp = nn.Sequential( nn.Linear(dim_out, hidden_dim), nn.ReLU(inplace = True), nn.Linear(hidden_dim, dim_out) ) 
+            
+        self.LayerNorm_input = nn.LayerNorm(dim_in) 
+        self.LayerNorm_slots = nn.LayerNorm(dim_out) 
+        self.LayerNorm_pre_ff = nn.LayerNorm(dim_out) 
         
     def forward(self, inputs, shared_init_slots = None): 
         b, n, d, device, dtype = *inputs.shape, inputs.device, inputs.dtype 
@@ -179,8 +186,14 @@ class SlotAttention(nn.Module):
             updates = torch.einsum('bjd,bij->bid', v, attn) 
             
             # slots = self.gru( updates.reshape(-1, d), slots_prev.reshape(-1, d) ) 
-            slots = self.gru( updates.flatten(0, 1), slots_prev.flatten(0, 1) ) 
-            slots = slots + self.mlp(self.LayerNorm_pre_ff(slots)) 
+            if self.args.add_gru == 'True':
+                slots = self.gru( updates.flatten(0, 1), slots_prev.flatten(0, 1) ) 
+            else:
+                slots = updates.flatten(0, 1)
+            
+            if self.args.add_mlp == 'True':
+                slots = slots + self.mlp(self.LayerNorm_pre_ff(slots)) 
+            
             # slots = slots.reshape(b, -1, d) 
             slots = slots.unflatten(0, (b, 2))
 

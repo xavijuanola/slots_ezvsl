@@ -6,6 +6,7 @@ import argparse
 import builtins
 import time
 import numpy as np
+from torch.optim import *
 
 import torch
 import torch.nn.functional as F
@@ -54,6 +55,8 @@ def get_arguments():
     parser.add_argument('--tau', default=0.03, type=float, help='tau')
 
     # slot attention hyper-params
+    parser.add_argument('--add_gru', default='True', type=str, help='["False", "True"]')
+    parser.add_argument('--add_mlp', default='True', type=str, help='["False", "True"]')
     parser.add_argument('--w_bias', default='True', type=str, help='whether to use bias in the attention weights')
     parser.add_argument('--n_attention_modules', default=2, type=int, help='number of attention modules')
     parser.add_argument('--slot_clone', default='True', type=str, help='whether to clone slot attention module (same W initialization)')
@@ -177,7 +180,9 @@ def main_worker(gpu, ngpus_per_node, args):
     # print(model)
 
     # Optimizer
-    optimizer, _ = utils.build_optimizer_and_scheduler_adamW(model, args)
+    # optimizer, _ = utils.build_optimizer_and_scheduler_adamW(model, args)
+    optimizer_grouped_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    optimizer = AdamW(optimizer_grouped_parameters, lr=args.init_lr, betas=(0.9, 0.999)) # Better for weight decay
 
     warmup_epochs = 0
     total_epochs = args.epochs
@@ -295,27 +300,28 @@ def main_worker(gpu, ngpus_per_node, args):
         #         })
         
         # Checkpoint
-        if args.rank == 0:
-            ckp = {'model': model.state_dict(),
-                   'optimizer': optimizer.state_dict(),
-                   'scheduler': scheduler.state_dict(),
-                   'plateau_scheduler': plateau_scheduler.state_dict(),  # Add plateau scheduler state
-                   'epoch': epoch+1,
-                   'best_cIoU': best_cIoU,
-                   'best_Auc': best_Auc}
-            torch.save(ckp, os.path.join(model_dir, 'latest.pth'))
-            print(f"Model saved to {model_dir}")
-        
-        if args.testset == 'vggss_144k':
-            if loss_info_nce >= best_loss_info_nce:
-                best_loss_info_nce = loss_info_nce
-                if args.rank == 0:
-                    torch.save(ckp, os.path.join(model_dir, 'best.pth'))
-        else:
-            if cIoU >= best_cIoU:
-                best_cIoU, best_Auc = cIoU, auc
-                if args.rank == 0:
-                    torch.save(ckp, os.path.join(model_dir, 'best.pth'))
+        if args.debug != 'True':
+            if args.rank == 0:
+                ckp = {'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                    'plateau_scheduler': plateau_scheduler.state_dict(),  # Add plateau scheduler state
+                    'epoch': epoch+1,
+                    'best_cIoU': best_cIoU,
+                    'best_Auc': best_Auc}
+                torch.save(ckp, os.path.join(model_dir, 'latest.pth'))
+                print(f"Model saved to {model_dir}")
+            
+            if args.testset == 'vggss_144k':
+                if loss_info_nce >= best_loss_info_nce:
+                    best_loss_info_nce = loss_info_nce
+                    if args.rank == 0:
+                        torch.save(ckp, os.path.join(model_dir, 'best.pth'))
+            else:
+                if cIoU >= best_cIoU:
+                    best_cIoU, best_Auc = cIoU, auc
+                    if args.rank == 0:
+                        torch.save(ckp, os.path.join(model_dir, 'best.pth'))
     
     # Finish wandb run
     if args.wandb == 'True' and args.rank == 0:
@@ -363,14 +369,14 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             
         loss_info_nce, loss_match, loss_div, loss_recon = compute_loss(img_slot_out, aud_slot_out, args, mode='train')
 
-        loss = args.lambda_info_nce * loss_info_nce + args.lambda_match * loss_match + args.lambda_div * loss_div + args.lambda_recon * loss_recon      
+        loss = loss_info_nce + loss_match + loss_div + loss_recon      
 
         # Update running averages
         avg_total_loss.update(loss.item())
-        avg_info_nce_loss.update(args.lambda_info_nce * loss_info_nce.item())
-        avg_match_loss.update(args.lambda_match * loss_match.item())
-        avg_div_loss.update(args.lambda_div * loss_div.item()) 
-        avg_recon_loss.update(args.lambda_recon * loss_recon.item())
+        avg_info_nce_loss.update(loss_info_nce.item())
+        avg_match_loss.update(loss_match.item())
+        avg_div_loss.update(loss_div.item()) 
+        avg_recon_loss.update(loss_recon.item())
 
         # optimizer.zero_grad()
         # loss.backward()

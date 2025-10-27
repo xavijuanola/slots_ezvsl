@@ -1,6 +1,7 @@
 import os
 import csv
 import librosa
+import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -198,11 +199,20 @@ def get_train_test_dataset(args):
     val_data = remaining_files[:5000]
 
     if args.debug == 'True':
-        train_data = train_data[:500]
-        val_data = val_data[:50]
-
-    args.train_log_files = ['1ksINuMyHV4_000014', '0kGVS6nRjgA_000091']
-    args.val_log_files = ['7bdDCI8Q3mY_000208', 'WTMrgwvE84o_000000']
+        # train_data = pd.read_csv("subset1.csv")["Filename"].tolist()
+        # val_data = pd.read_csv("subset2.csv")["Filename"].tolist()
+        # args.train_log_files = train_data[-2:]
+        # args.val_log_files = val_data[-2:]
+        
+        train_data = train_data[:96]
+        val_data = val_data[:32]
+        
+        args.train_log_files = ['1ksINuMyHV4_000014', '0kGVS6nRjgA_000091']
+        args.val_log_files = ['7bdDCI8Q3mY_000208', 'WTMrgwvE84o_000000']
+        
+    else:    
+        args.train_log_files = ['1ksINuMyHV4_000014', '0kGVS6nRjgA_000091']
+        args.val_log_files = ['7bdDCI8Q3mY_000208', 'WTMrgwvE84o_000000']
 
     # Ensure train_log_files are in train_data and NOT in val_data
     for log_file in args.train_log_files:
