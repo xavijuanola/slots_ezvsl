@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchvision.models import resnet18
+import copy
 
 
 class EZVSL(nn.Module):
@@ -43,22 +44,33 @@ class EZVSL(nn.Module):
                 hidden_dim = args.hidden_dim
             )
         else:
-            self.image_slot_attention = SlotAttention(
-                num_slots=args.num_slots,
-                args=args,
-                dim=dim,
-                iters = args.iters,
-                eps = args.eps, 
-                hidden_dim = args.hidden_dim
-            )
-            self.audio_slot_attention = SlotAttention(
-                num_slots=args.num_slots,
-                args=args,
-                dim=dim,
-                iters = args.iters,
-                eps = args.eps, 
-                hidden_dim = args.hidden_dim
-            )
+            if self.args.slot_clone == 'True':
+                self.image_slot_attention = SlotAttention(
+                    num_slots=args.num_slots,
+                    args=args,
+                    dim=dim,
+                    iters = args.iters,
+                    eps = args.eps, 
+                    hidden_dim = args.hidden_dim
+                )
+                self.audio_slot_attention = copy.deepcopy(self.image_slot_attention)
+            else:
+                self.image_slot_attention = SlotAttention(
+                    num_slots=args.num_slots,
+                    args=args,
+                    dim=dim,
+                    iters = args.iters,
+                    eps = args.eps, 
+                    hidden_dim = args.hidden_dim
+                )
+                self.audio_slot_attention = SlotAttention(
+                    num_slots=args.num_slots,
+                    args=args,
+                    dim=dim,
+                    iters = args.iters,
+                    eps = args.eps, 
+                    hidden_dim = args.hidden_dim
+                )
 
         self.img_slot_decoder = SlotDecoder(slot_dim=1024, hidden_dim=dim)
         self.aud_slot_decoder = SlotDecoder(slot_dim=1024, hidden_dim=dim)

@@ -8,13 +8,13 @@ python train.py \
     --audio_augmentations 'False' \
     --debug 'False' \
     --batch_size 256 \
-    --experiment_name paper_2slots \
+    --experiment_name paper_2slots_clone \
     --wandb 'True' \
     --wandb_project 'ezvsl-slots' \
     --w_bias 'True' \
     --num_slots 2 \
     --n_attention_modules 2 \
-    --slot_clone 'False' \
+    --slot_clone 'True' \
     --iters 5 \
     --eps 1e-8 \
     --hidden_dim 512 \

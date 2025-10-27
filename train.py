@@ -56,6 +56,7 @@ def get_arguments():
     # slot attention hyper-params
     parser.add_argument('--w_bias', default='True', type=str, help='whether to use bias in the attention weights')
     parser.add_argument('--n_attention_modules', default=2, type=int, help='number of attention modules')
+    parser.add_argument('--slot_clone', default='True', type=str, help='whether to clone slot attention module (same W initialization)')
     parser.add_argument('--num_slots', default=2, type=int)
     parser.add_argument('--iters', default=5, type=int)
     parser.add_argument('--eps', default=1e-8, type=float)
