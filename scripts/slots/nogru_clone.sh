@@ -9,16 +9,16 @@ python train.py \
     --debug 'False' \
     --wandb 'True' \
     --batch_size 256 \
-    --experiment_name d7 \
+    --experiment_name nogru_clone \
     --wandb_project 'ezvsl-slots' \
     --w_bias 'True' \
     --num_slots 2 \
-    --add_gru 'True' \
+    --add_gru 'False' \
     --add_mlp 'True' \
-    --out_dim 7 \
-    --hidden_dim 7 \
+    --out_dim 512 \
+    --hidden_dim 512 \
     --n_attention_modules 2 \
-    --slot_clone 'False' \
+    --slot_clone 'True' \
     --iters 5 \
     --eps 1e-8 \
     --tau 0.03 \
