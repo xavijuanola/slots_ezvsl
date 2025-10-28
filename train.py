@@ -309,20 +309,31 @@ def main_worker(gpu, ngpus_per_node, args):
                     'epoch': epoch+1,
                     'best_cIoU': best_cIoU,
                     'best_Auc': best_Auc}
+                
+                # Save latest checkpoint
                 torch.save(ckp, os.path.join(model_dir, 'latest.pth'))
-                print(f"Model saved to {model_dir}")
+                print(f"Latest model saved to {model_dir}")
+                
+                # Save epoch-specific checkpoint
+                epoch_ckp_path = os.path.join(model_dir, f'epoch_{epoch+1:03d}.pth')
+                torch.save(ckp, epoch_ckp_path)
+                print(f"Epoch {epoch+1} model saved to {epoch_ckp_path}")
             
             if args.testset == 'vggss_144k':
                 if loss_info_nce >= best_loss_info_nce:
                     best_loss_info_nce = loss_info_nce
                     if args.rank == 0:
                         torch.save(ckp, os.path.join(model_dir, 'best.pth'))
+                        print(f"Best model saved to {model_dir}")
             else:
                 if cIoU >= best_cIoU:
                     best_cIoU, best_Auc = cIoU, auc
                     if args.rank == 0:
                         torch.save(ckp, os.path.join(model_dir, 'best.pth'))
-    
+                        print(f"Best model saved to {model_dir}")
+                        epoch_ckp_path = os.path.join(model_dir, f'epoch_{epoch+1:03d}.pth')
+                        torch.save(ckp, epoch_ckp_path)
+                        print(f"Epoch {epoch+1} model saved to {epoch_ckp_path}")
     # Finish wandb run
     if args.wandb == 'True' and args.rank == 0:
         wandb.finish()

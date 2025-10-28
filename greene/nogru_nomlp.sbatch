@@ -7,9 +7,9 @@
 #SBATCH --time=168:00:00
 #SBATCH --mem=180GB
 #SBATCH --gres=gpu:rtx8000:1
-#SBATCH --job-name=nogru_nocomp
-#SBATCH -o/scratch/xj2376/jobs/ssl_slots/nogru_nocomp.out
-#SBATCH -e/scratch/xj2376/jobs/ssl_slots/nogru_nocomp.err
+#SBATCH --job-name=nogru_nomlp
+#SBATCH -o/scratch/xj2376/jobs/slots_ezvsl/nogru_nomlp.out
+#SBATCH -e/scratch/xj2376/jobs/slots_ezvsl/nogru_nomlp.err
 
 module purge
 
@@ -39,6 +39,6 @@ export SSL_CERT_FILE="$CACERT_PATH"
 
 cd /scratch/xj2376/code/slots_ezvsl
 
-bash scripts/slots/nogru_nocomp.sh
+bash scripts/slots/nogru_nomlp.sh
 
 EOF

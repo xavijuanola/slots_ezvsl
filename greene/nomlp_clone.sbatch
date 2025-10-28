@@ -7,9 +7,9 @@
 #SBATCH --time=168:00:00
 #SBATCH --mem=180GB
 #SBATCH --gres=gpu:rtx8000:1
-#SBATCH --job-name=d7
-#SBATCH -o/scratch/xj2376/jobs/ssl_slots/d7.out
-#SBATCH -e/scratch/xj2376/jobs/ssl_slots/d7.err
+#SBATCH --job-name=nomlp_clone
+#SBATCH -o/scratch/xj2376/jobs/slots_ezvsl/nomlp_clone.out
+#SBATCH -e/scratch/xj2376/jobs/slots_ezvsl/nomlp_clone.err
 
 module purge
 
@@ -39,6 +39,6 @@ export SSL_CERT_FILE="$CACERT_PATH"
 
 cd /scratch/xj2376/code/slots_ezvsl
 
-bash scripts/slots/d7.sh
+bash scripts/slots/nomlp_clone.sh
 
 EOF

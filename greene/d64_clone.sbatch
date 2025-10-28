@@ -8,8 +8,8 @@
 #SBATCH --mem=180GB
 #SBATCH --gres=gpu:rtx8000:1
 #SBATCH --job-name=d64_clone
-#SBATCH -o/scratch/xj2376/jobs/ssl_slots/d64_clone.out
-#SBATCH -e/scratch/xj2376/jobs/ssl_slots/d64_clone.err
+#SBATCH -o/scratch/xj2376/jobs/slots_ezvsl/d64_clone.out
+#SBATCH -e/scratch/xj2376/jobs/slots_ezvsl/d64_clone.err
 
 module purge
 
