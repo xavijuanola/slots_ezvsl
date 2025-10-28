@@ -251,6 +251,15 @@ def main_worker(gpu, ngpus_per_node, args):
         print(f'    ----Validation epoch {start_epoch}----')
         print(f'    cIoU (epoch {start_epoch}): {cIoU:.4f}')
         print(f'    AUC (epoch {start_epoch}): {auc:.4f}')
+
+    # Log visualizations for initial validation (only on rank 0)
+    if args.wandb == 'True':
+        if hasattr(args, 'train_log_files') and args.train_log_files:
+            print(f'    Logging initial train visualizations for epoch {start_epoch}...')
+            log_file_visualizations(traindataset, model, args.train_log_files, 'train', start_epoch, args)
+        if hasattr(args, 'val_log_files') and args.val_log_files:
+            print(f'    Logging initial validation visualizations for epoch {start_epoch}...')
+            log_file_visualizations(testdataset, model, args.val_log_files, 'val', start_epoch, args)
         
     best_loss_info_nce = loss_info_nce
     for epoch in range(start_epoch, args.epochs):
@@ -281,6 +290,15 @@ def main_worker(gpu, ngpus_per_node, args):
             cIoU, auc = validate_vggss(test_loader, model, args, epoch)
             print(f'    cIoU (epoch {epoch}): {cIoU:.4f}')
             print(f'    AUC (epoch {epoch}): {auc:.4f}')
+
+        # Log visualizations for specified files after epoch completion (only on rank 0)
+        if args.wandb == 'True' and args.rank == 0:
+            if hasattr(args, 'train_log_files') and args.train_log_files:
+                print(f'    Logging train visualizations for epoch {epoch}...')
+                log_file_visualizations(traindataset, model, args.train_log_files, 'train', epoch, args)
+            if hasattr(args, 'val_log_files') and args.val_log_files:
+                print(f'    Logging validation visualizations for epoch {epoch}...')
+                log_file_visualizations(testdataset, model, args.val_log_files, 'val', epoch, args)
 
         # # Log validation metrics to wandb (only on rank 0)
         # if args.wandb a== 'True':
@@ -403,26 +421,109 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
         if i % 10 == 0 or i == len(train_loader) - 1:
             pbar.set_postfix({'TOTAL': f'{loss.item():.4f}', 'CONTR': f'{loss_info_nce.item():.4f}', 'MATCH': f'{loss_match.item():.4f}', 'DIV': f'{loss_div.item():.4f}', 'REC': f'{loss_recon.item():.4f}'})
             
-            # Log to wandb (only on rank 0)
+            # Log to wandb
             if args.wandb == 'True':
                 wandb.log({
-                    'train/total_loss': loss.item(),
-                    'train/info_nce_loss': loss_info_nce.item(),
-                    'train/matching_loss': loss_match.item(),
-                    'train/divergence_loss': loss_div.item(),
-                    'train/reconstruction_loss': loss_recon.item(),
-                    'train/learning_rate': optimizer.param_groups[0]['lr'],  # Add this line
-                    'train/epoch': epoch,
-                    'train/train_step': train_step + i  # Use training-specific step
+                    # Batch-level current losses (logged per step)
+                    'train/batch_total_loss': loss.item(),
+                    'train/batch_info_nce_loss': loss_info_nce.item(),
+                    'train/batch_matching_loss': loss_match.item(),
+                    'train/batch_divergence_loss': loss_div.item(),
+                    'train/batch_reconstruction_loss': loss_recon.item(),
+                    # Batch-level average losses (logged per step)
+                    'train/batch_avg_total_loss': avg_total_loss.avg,
+                    'train/batch_avg_info_nce_loss': avg_info_nce_loss.avg,
+                    'train/batch_avg_matching_loss': avg_match_loss.avg,
+                    'train/batch_avg_divergence_loss': avg_div_loss.avg,
+                    'train/batch_avg_reconstruction_loss': avg_recon_loss.avg,
+                    'train/learning_rate': optimizer.param_groups[0]['lr'],
+                    'train/batch_step': train_step + i  # Step for batch-level logging
                 })
+
+        del loss
+
+    # Log epoch averages to wandb
+    if args.wandb == 'True':
+        wandb.log({
+            'train/epoch_avg_total_loss': avg_total_loss.avg,
+            'train/epoch_avg_info_nce_loss': avg_info_nce_loss.avg,
+            'train/epoch_avg_matching_loss': avg_match_loss.avg,
+            'train/epoch_avg_divergence_loss': avg_div_loss.avg,
+            'train/epoch_avg_reconstruction_loss': avg_recon_loss.avg,
+            'train/epoch': epoch,  # Same epoch number as validation
+            'epoch': epoch  # Common epoch key for plotting train vs val together
+        })
+
+
+def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
+    """
+    Log visualizations for specific files after epoch is complete.
+    Model should be in eval mode when calling this function.
+    
+    Args:
+        dataset: The dataset to get samples from (or the underlying dataset if using Subset)
+        model: The model (will be set to eval mode)
+        file_list: List of file IDs to log visualizations for
+        mode: 'train' or 'val'
+        epoch: Current epoch number
+        args: Training arguments
+    """
+    if not args.wandb == 'True' or not file_list:
+        return
+    
+    model.eval()
+    
+    # Handle Subset wrapper to get original dataset
+    original_dataset = dataset.dataset if hasattr(dataset, 'dataset') else dataset
+    
+    # Find indices of files in the dataset
+    file_indices = []
+    for file_id in file_list:
+        # Match file_id with dataset filenames
+        for idx in range(len(original_dataset)):
+            dataset_file = original_dataset.image_files[idx].split('.')[0]  # Remove .jpg extension
+            if file_id in dataset_file or dataset_file == file_id:
+                file_indices.append(idx)
+                break
+    
+    if not file_indices:
+        print(f"Warning: No matching files found in {mode} dataset for logging")
+        return
+    
+    # Create a subset dataset or DataLoader for these specific indices
+    from torch.utils.data import Subset
+    # Use original_dataset to create subset to avoid nested Subset issues
+    subset_dataset = Subset(original_dataset, file_indices)
+    subset_loader = torch.utils.data.DataLoader(
+        subset_dataset, batch_size=1, shuffle=False,
+        num_workers=0, pin_memory=False
+    )
+    
+    with torch.no_grad():
+        for batch_idx, (image, spec, bboxes, filename) in enumerate(subset_loader):
+            if args.gpu is not None:
+                spec = spec.cuda(args.gpu, non_blocking=True)
+                image = image.cuda(args.gpu, non_blocking=True)
             
-        # Add visualization logging for specific files
-        if args.wandb == 'True':
-            # Get attention maps for visualization
             B = image.shape[0]
             
-            # Cross-modal attention
-            cross_modal_attention_image = img_slot_out['cross_attn'].contiguous().view(B, 2, 7, 7)
+            aud_slot_out, img_slot_out = model(image.float(), spec.float())
+            
+            # Compute cross-modal attention
+            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q'], img_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
+            h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
+            cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True))
+
+            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q'], aud_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
+            cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True))
+            
+            img_slot_out['cross_attn'] = cross_modal_attention_ai
+            aud_slot_out['cross_attn'] = cross_modal_attention_ia
+            
+            # Prepare attention maps for visualization
+            cross_modal_attention_image = img_slot_out['cross_attn'].contiguous().view(B, 2, h, w)
             cross_modal_attention_image = F.interpolate(cross_modal_attention_image, size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
             
             cross_modal_attention_audio = aud_slot_out['cross_attn'].contiguous().view(B, 2, 7)
@@ -442,80 +543,57 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
             similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
             
-            # Log visualizations for files listed in args.train_log_files if present in filename
-            log_indices = []
-            # Check if args has train_log_files attribute and it's not None/empty
-            if hasattr(args, 'train_log_files') and args.train_log_files:
-                for idx, fname in enumerate(filename):
-                    if any(log_file in fname for log_file in args.train_log_files):
-                        log_indices.append(idx)
-            
-            if log_indices != []:
-                for i in log_indices:
-                    # Get prediction and ground truth
-                    orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
-                    orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
-                    
-                    orig_spec = spec[i,0].data.cpu().numpy()
-                    # orig_spec = inverse_normalize(spec[i]).cpu().permute(1,2,0).numpy()
-                    # orig_spec = np.clip(orig_spec, 0, 1)  # Clip to valid range
+            # Log visualizations for each sample
+            for i in range(B):
+                # Get original image and spectrogram
+                orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
+                orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
+                
+                orig_spec = spec[i,0].data.cpu().numpy()
 
-                    # Image logs
-                    similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
-                    
-                    fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
-                    wandb.log({f"{filename[i]}_train/similarity": wandb.Image(fig_similarity)})
-                    plt.close(fig_similarity)
-                    
-                    intra_modal_image_target = utils.normalize_img(intra_modal_attention_image[i, 0])
-                    intra_modal_image_offtarget = utils.normalize_img(intra_modal_attention_image[i, 1])
-                    
-                    fig_intramodal = gen_pred_figure(orig_img, intra_modal_image_target, intra_modal_image_offtarget)
-                    wandb.log({f"{filename[i]}_train/intramodal_image": wandb.Image(fig_intramodal)})
-                    plt.close(fig_intramodal)
-                    
-                    crossmodal_image_target = utils.normalize_img(cross_modal_attention_image[i, 0])
-                    crossmodal_image_offtarget = utils.normalize_img(cross_modal_attention_image[i, 1])
-                    
-                    fig_crossmodal_image = gen_pred_figure(orig_img, crossmodal_image_target, crossmodal_image_offtarget)
-                    wandb.log({f"{filename[i]}_train/crossmodal_image": wandb.Image(fig_crossmodal_image)})
-                    plt.close(fig_crossmodal_image)
-                    
-                    # Audio logs
-                    fig_spectrogram = plt.figure(figsize=(10, 5))
-                    ax = fig_spectrogram.add_subplot(111)
-                    ax.imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
-                    ax.set_title('Spectrogram')
-                    ax.axis('off')
-                    wandb.log({f"{filename[i]}_train/spectrogram": wandb.Image(fig_spectrogram)})
-                    plt.close(fig_spectrogram)
-                    
-                    intra_modal_audio_target = utils.normalize_img(intra_modal_attention_audio[i, 0])
-                    intra_modal_audio_offtarget = utils.normalize_img(intra_modal_attention_audio[i, 1])
-                    
-                    fig_intramodal_audio = gen_spec_pred_figure(orig_spec, intra_modal_audio_target, intra_modal_audio_offtarget)
-                    wandb.log({f"{filename[i]}_train/intramodal_audio": wandb.Image(fig_intramodal_audio)})
-                    plt.close(fig_intramodal_audio)                    
-                    
-                    crossmodal_audio_target = utils.normalize_img(cross_modal_attention_audio[i, 0])
-                    crossmodal_audio_offtarget = utils.normalize_img(cross_modal_attention_audio[i, 1])
-                    
-                    fig_crossmodal_audio = gen_spec_pred_figure(orig_spec, crossmodal_audio_target, crossmodal_audio_offtarget)
-                    wandb.log({f"{filename[i]}_train/crossmodal_audio": wandb.Image(fig_crossmodal_audio)})
-                    plt.close(fig_crossmodal_audio)
-
-        del loss
-
-    # Log epoch averages to wandb
-    if args.wandb == 'True':
-        wandb.log({
-            'train/epoch_avg_total_loss': avg_total_loss.avg,
-            'train/epoch_avg_info_nce_loss': avg_info_nce_loss.avg,
-            'train/epoch_avg_matching_loss': avg_match_loss.avg,
-            'train/epoch_avg_divergence_loss': avg_div_loss.avg,
-            'train/epoch_avg_reconstruction_loss': avg_recon_loss.avg,
-            'train/epoch': epoch
-        })
+                # Image logs
+                similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
+                
+                fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
+                wandb.log({f"{filename[i]}_{mode}/similarity": wandb.Image(fig_similarity), 'epoch': epoch})
+                plt.close(fig_similarity)
+                
+                intra_modal_image_target = utils.normalize_img(intra_modal_attention_image[i, 0])
+                intra_modal_image_offtarget = utils.normalize_img(intra_modal_attention_image[i, 1])
+                
+                fig_intramodal = gen_pred_figure(orig_img, intra_modal_image_target, intra_modal_image_offtarget)
+                wandb.log({f"{filename[i]}_{mode}/intramodal_image": wandb.Image(fig_intramodal), 'epoch': epoch})
+                plt.close(fig_intramodal)
+                
+                crossmodal_image_target = utils.normalize_img(cross_modal_attention_image[i, 0])
+                crossmodal_image_offtarget = utils.normalize_img(cross_modal_attention_image[i, 1])
+                
+                fig_crossmodal_image = gen_pred_figure(orig_img, crossmodal_image_target, crossmodal_image_offtarget)
+                wandb.log({f"{filename[i]}_{mode}/crossmodal_image": wandb.Image(fig_crossmodal_image), 'epoch': epoch})
+                plt.close(fig_crossmodal_image)
+                
+                # Audio logs
+                fig_spectrogram = plt.figure(figsize=(10, 5))
+                ax = fig_spectrogram.add_subplot(111)
+                ax.imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
+                ax.set_title('Spectrogram')
+                ax.axis('off')
+                wandb.log({f"{filename[i]}_{mode}/spectrogram": wandb.Image(fig_spectrogram), 'epoch': epoch})
+                plt.close(fig_spectrogram)
+                
+                intra_modal_audio_target = utils.normalize_img(intra_modal_attention_audio[i, 0])
+                intra_modal_audio_offtarget = utils.normalize_img(intra_modal_attention_audio[i, 1])
+                
+                fig_intramodal_audio = gen_spec_pred_figure(orig_spec, intra_modal_audio_target, intra_modal_audio_offtarget)
+                wandb.log({f"{filename[i]}_{mode}/intramodal_audio": wandb.Image(fig_intramodal_audio), 'epoch': epoch})
+                plt.close(fig_intramodal_audio)
+                
+                crossmodal_audio_target = utils.normalize_img(cross_modal_attention_audio[i, 0])
+                crossmodal_audio_offtarget = utils.normalize_img(cross_modal_attention_audio[i, 1])
+                
+                fig_crossmodal_audio = gen_spec_pred_figure(orig_spec, crossmodal_audio_target, crossmodal_audio_offtarget)
+                wandb.log({f"{filename[i]}_{mode}/crossmodal_audio": wandb.Image(fig_crossmodal_audio), 'epoch': epoch})
+                plt.close(fig_crossmodal_audio)
 
 
 def validate(test_loader, model, args, epoch):
@@ -563,92 +641,22 @@ def validate(test_loader, model, args, epoch):
 
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
             similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
-            
-            # avl_map = img_slot_out['cross_attn'].reshape(B, 2, 7, 7)
-
-            # avl_map = F.interpolate(avl_map, size=(224, 224), mode='bilinear', align_corners=False)
-            # avl_map = avl_map.data.cpu().numpy()
-
-            if args.wandb == 'True':
-                # Log visualizations for files listed in args.val_lg_files if present in filename, else fallback to first 2 elements
-                log_indices = []
-                # Check if args has val_lg_files attribute and it's not None/empty
-                if hasattr(args, 'val_log_files') and args.val_log_files:
-                    for idx, fname in enumerate(filename):
-                        if any(log_file in fname for log_file in args.val_log_files):
-                            log_indices.append(idx)
-                # If no matches, fallback to first 2 as before
-                # if not log_indices:
-                #     log_indices = range(min(2, len(filename)))
-                if log_indices != []:
-                    for i in log_indices:
-                        # Get prediction and ground truth
-                        orig_img = inverse_normalize(image[i]).cpu().permute(1,2,0).numpy()
-                        orig_img = np.clip(orig_img, 0, 1)  # Clip to valid range
-
-                        orig_spec = spec[i,0].data.cpu().numpy()
-                        # orig_spec = inverse_normalize(spec[i]).cpu().permute(1,2,0).numpy()
-                        # orig_spec = np.clip(orig_spec, 0, 1)  # Clip to valid range
-                    
-                        # Image logs
-                        similarity_embeddings_target = utils.normalize_img(similarity_embeddings[i, 0])
-                        
-                        fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
-                        wandb.log({f"{filename[i]}_val/similarity": wandb.Image(fig_similarity)})
-                        plt.close(fig_similarity)
-                        
-                        intra_modal_image_target = utils.normalize_img(intra_modal_attention_i[i, 0])
-                        intra_modal_image_offtarget = utils.normalize_img(intra_modal_attention_i[i, 1])
-                        
-                        fig_intramodal_image = gen_pred_figure(orig_img, intra_modal_image_target, intra_modal_image_offtarget)
-                        wandb.log({f"{filename[i]}_val/intramodal_image": wandb.Image(fig_intramodal_image)})
-                        plt.close(fig_intramodal_image)
-                        
-                        crossmodal_image_target = utils.normalize_img(cross_modal_attention_ai[i, 0])
-                        crossmodal_image_offtarget = utils.normalize_img(cross_modal_attention_ai[i, 1])
-                        
-                        fig_crossmodal_image = gen_pred_figure(orig_img, crossmodal_image_target, crossmodal_image_offtarget)
-                        wandb.log({f"{filename[i]}_val/crossmodal_image": wandb.Image(fig_crossmodal_image)})
-                        plt.close(fig_crossmodal_image)
-                        
-                        # Audio logs
-                        fig_spectrogram = plt.figure(figsize=(10, 5))
-                        ax = fig_spectrogram.add_subplot(111)
-                        ax.imshow(orig_spec, origin='lower', aspect='auto', cmap='magma')
-                        ax.set_title('Spectrogram')
-                        ax.axis('off')
-                        wandb.log({f"{filename[i]}_val/spectrogram": wandb.Image(fig_spectrogram)})
-                        plt.close(fig_spectrogram)
-                        
-                        intra_modal_audio_target = utils.normalize_img(intra_modal_attention_a[i, 0])
-                        intra_modal_audio_offtarget = utils.normalize_img(intra_modal_attention_a[i, 1])
-                        
-                        fig_intramodal_audio = gen_spec_pred_figure(orig_spec, intra_modal_audio_target, intra_modal_audio_offtarget)
-                        wandb.log({f"{filename[i]}_val/intramodal_audio": wandb.Image(fig_intramodal_audio)})
-                        plt.close(fig_intramodal_audio)
-                        
-                        crossmodal_audio_target = utils.normalize_img(cross_modal_attention_ia[i, 0])
-                        crossmodal_audio_offtarget = utils.normalize_img(cross_modal_attention_ia[i, 1])
-                        
-                        fig_crossmodal_audio = gen_spec_pred_figure(orig_spec, crossmodal_audio_target, crossmodal_audio_offtarget)
-                        wandb.log({f"{filename[i]}_val/crossmodal_audio": wandb.Image(fig_crossmodal_audio)})
-                        plt.close(fig_crossmodal_audio)
                         
             # Log current loss
             if args.wandb == 'True':
                 wandb.log({
-                    'val/current_loss': loss_info_nce.item(),
-                    'val/step': val_step,
-                    'val/epoch': epoch  # Use epoch for validation
+                    'val/batch_current_loss': loss_info_nce.item(),
+                    'val/batch_avg_loss': avg_loss.avg,  # Batch-level running average
+                    'val/batch_step': val_step,  # Step for batch-level logging
                 })
 
         # Log epoch-level validation metrics
-        if args.wandb == 'True' and args.rank == 0:
+        if args.wandb == 'True':
             wandb.log({
-                'val/Info NCE Loss': loss_info_nce.item(),
-                'val/avg_loss': avg_loss.avg,
-                'val/epoch': epoch,
-                'val/epoch_step': val_step  # Use epoch as step for validation
+                'val/epoch_avg_loss': avg_loss.avg,  # Epoch-level average loss
+                'val/epoch_info_nce_loss': avg_loss.avg,  # Alias for consistency
+                'val/epoch': epoch,  # Same epoch number as training
+                'epoch': epoch  # Common epoch key for plotting train vs val together
             })
     return loss_info_nce.item()
 
