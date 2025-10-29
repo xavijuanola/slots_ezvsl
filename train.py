@@ -591,13 +591,81 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
             
             aud_slot_out, img_slot_out = model(image.float(), spec.float())
             
+            if args.slots_maxsim == 'True':
+                # Find which is the positive slot based on maximum similarity
+                aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
+                img_slots = F.normalize(img_slot_out['slots'], dim=1)
+                
+                # Compute all pairwise similarities between audio and image slots across the batch: [B, B, N, N]
+                similarity_slots = torch.einsum('bnc,vmc->bvnm', aud_slots, img_slots)
+                
+                # For each pair (b, v), find the (audio slot, image slot) that has the maximum similarity
+                # max_indices: [B, B, 2], where [:,:,0]=audio slot index, [:,:,1]=image slot index
+                max_similarities, flat_indices = similarity_slots.reshape(similarity_slots.shape[0], similarity_slots.shape[1], -1).max(dim=-1)
+                audio_slot_indices = flat_indices // similarity_slots.shape[3]
+                image_slot_indices = flat_indices % similarity_slots.shape[3]
+                max_slot_indices = torch.stack([audio_slot_indices, image_slot_indices], dim=-1)  # Shape: [B, B, 2] (audio slot idx, image slot idx)
+                
+                # Select the target and off-target slots for each pair in the batch based on max_slot_indices
+                # aud_slots: [B, N, C], img_slots: [B, N, C]
+                B, N, C = aud_slots.shape
+
+                # Prepare for all pairs: for [b, v], get their "target" slot indices
+                # Gather target audio slots across the batch
+                batch_indices = torch.arange(B, device=aud_slots.device)
+                # For each pair (b,v): v is the image index, b is the audio index
+
+                # Reordenar los slots para que el target esté en la posición 0 y el off-target en la posición 1
+                aud_slot_out['slots_sorted'] = torch.stack([
+                    aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target slot
+                    aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target slot
+                ], dim=1)
+
+                img_slot_out['slots_sorted'] = torch.stack([
+                    img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target slot
+                    img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target slot
+                ], dim=1)
+
+                # Reordenar los tensores 'q' y 'attn' de manera similar
+                aud_slot_out['q_sorted'] = torch.stack([
+                    aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target q
+                    aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target q
+                ], dim=1)
+
+                img_slot_out['q_sorted'] = torch.stack([
+                    img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target q
+                    img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target q
+                ], dim=1)
+
+                # Reordenar los tensores 'attn' de manera similar
+                aud_slot_out['attn_sorted'] = torch.stack([
+                    aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target attn
+                    aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target attn
+                ], dim=1)
+
+                img_slot_out['attn_sorted'] = torch.stack([
+                    img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target attn
+                    img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target attn
+                ], dim=1)
+            else:
+                aud_slot_out['slots_sorted'] = aud_slot_out['slots']
+                img_slot_out['slots_sorted'] = img_slot_out['slots']
+
+                # Reordenar los tensores 'q' y 'attn' de manera similar
+                aud_slot_out['q_sorted'] = aud_slot_out['q']
+                img_slot_out['q_sorted'] = img_slot_out['q']
+
+                # Reordenar los tensores 'attn' de manera similar
+                aud_slot_out['attn_sorted'] = aud_slot_out['intra_attn']
+                img_slot_out['attn_sorted'] = img_slot_out['intra_attn']
+            
             # Compute cross-modal attention
-            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q'], img_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q_sorted'], img_slot_out['k']) * (512 ** -0.5)
             cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
             h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
             cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True))
 
-            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q'], aud_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q_sorted'], aud_slot_out['k']) * (512 ** -0.5)
             cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
             cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True))
             
@@ -767,13 +835,13 @@ def validate(test_loader, model, args, epoch):
             avg_loss.update(loss_info_nce.item())
 
             # Cross-modal Attention
-            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q'], img_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q_sorted'], img_slot_out['k']) * (512 ** -0.5)
             cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
             h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
             cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).contiguous().view(B, 2, h, w)
             cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
-            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q'], aud_slot_out['k']) * (512 ** -0.5)
+            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q_sorted'], aud_slot_out['k']) * (512 ** -0.5)
             cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
             cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True)).contiguous()
             cross_modal_attention_ia = F.interpolate(cross_modal_attention_ia, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
