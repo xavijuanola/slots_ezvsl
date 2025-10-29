@@ -9,7 +9,7 @@ python train.py \
     --debug 'False' \
     --wandb 'True' \
     --batch_size 256 \
-    --experiment_name d64_hd128_c \
+    --experiment_name d64_hd128 \
     --wandb_project 'ezvsl-slots' \
     --w_bias 'True' \
     --num_slots 2 \
