@@ -30,7 +30,7 @@
                 "--audio_augmentations",
                 "ssltie",
                 "--slots_maxsim",
-                "True",
+                "False",
                 "--debug",
                 "True",
                 "--batch_size",

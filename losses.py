@@ -226,9 +226,9 @@ def compute_loss(img_slot_out, aud_slot_out, args, mode='train'):
         )
         
         loss_match = args.lambda_match * compute_matching_loss(
-            img_slot_out['intra_attn'][:, 0, :], # Target image intra-modal attention
+            img_slot_out['attn_sorted'][:, 0, :], # Target image intra-modal attention
             img_slot_out['cross_attn'][:, 0, :], # Target audio-image cross-modal attention
-            aud_slot_out['intra_attn'][:, 0, :], # Target audio intra-modal attention
+            aud_slot_out['attn_sorted'][:, 0, :], # Target audio intra-modal attention
             aud_slot_out['cross_attn'][:, 0, :], # Target image-audio cross-modal attention
             )
         

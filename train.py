@@ -612,10 +612,10 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
             cross_modal_attention_audio = F.interpolate(cross_modal_attention_audio, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Intra-modal Attention
-            intra_modal_attention_image = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
+            intra_modal_attention_image = img_slot_out['attn_sorted'].contiguous().view(B, 2, h, w)
             intra_modal_attention_image = F.interpolate(intra_modal_attention_image, size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
 
-            intra_modal_attention_audio = aud_slot_out['intra_attn'].contiguous().view(B, 2, 7)
+            intra_modal_attention_audio = aud_slot_out['attn_sorted'].contiguous().view(B, 2, 7)
             intra_modal_attention_audio = F.interpolate(intra_modal_attention_audio, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Similarity Embeddings
@@ -694,7 +694,6 @@ def validate(test_loader, model, args, epoch):
             B = image.shape[0]
             
             aud_slot_out, img_slot_out = model(image.float(), spec.float())
-
 
             if args.slots_maxsim == 'True':
                 # Find which is the positive slot based on maximum similarity
@@ -780,10 +779,10 @@ def validate(test_loader, model, args, epoch):
             cross_modal_attention_ia = F.interpolate(cross_modal_attention_ia, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Intra-modal Attention
-            intra_modal_attention_i = img_slot_out['intra_attn'].contiguous().view(B, 2, h, w)
+            intra_modal_attention_i = img_slot_out['attn_sorted'].contiguous().view(B, 2, h, w)
             intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
-            intra_modal_attention_a = aud_slot_out['intra_attn'].contiguous().view(B, 2, 7)
+            intra_modal_attention_a = aud_slot_out['attn_sorted'].contiguous().view(B, 2, 7)
             intra_modal_attention_a = F.interpolate(intra_modal_attention_a, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
             # Similarity Embeddings
