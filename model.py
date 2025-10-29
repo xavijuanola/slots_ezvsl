@@ -203,8 +203,8 @@ class SlotAttention(nn.Module):
             if self.args.add_mlp == 'True':
                 slots = slots + self.mlp(self.LayerNorm_pre_ff(slots)) 
             
-            # slots = slots.reshape(b, -1, d) 
             slots = slots.unflatten(0, (b, 2))
+            # slots = slots.reshape(b, -1, d) 
 
         slots_data = { 'slots': slots, 'q': q, 'k': k, 'intra_attn': attn } 
         

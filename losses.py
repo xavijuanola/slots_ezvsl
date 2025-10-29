@@ -233,15 +233,15 @@ def compute_loss(img_slot_out, aud_slot_out, args, mode='train'):
             )
         
         loss_div = args.lambda_div * compute_divergence_loss(
-            img_slot_out['slots'][:, 0, :], # Target image slot
-            img_slot_out['slots'][:, 1, :], # Off-target image slot
-            aud_slot_out['slots'][:, 0, :], # Target audio slot   
-            aud_slot_out['slots'][:, 1, :]  # Off-target audio slot
+            img_slot_out['slots_sorted'][:, 0, :], # Target image slot
+            img_slot_out['slots_sorted'][:, 1, :], # Off-target image slot
+            aud_slot_out['slots_sorted'][:, 0, :], # Target audio slot   
+            aud_slot_out['slots_sorted'][:, 1, :]  # Off-target audio slot
         )
         
         loss_info_nce = args.lambda_info_nce * compute_info_nce_loss3(
-            img_slot_out['slots'][:, 0, :], # Target image slot
-            aud_slot_out['slots'][:, 0, :], # Target audio slot
+            img_slot_out['slots_sorted'][:, 0, :], # Target image slot
+            aud_slot_out['slots_sorted'][:, 0, :], # Target audio slot
             temperature=args.tau # Temperature for InfoNCE loss
         )
 
@@ -250,8 +250,8 @@ def compute_loss(img_slot_out, aud_slot_out, args, mode='train'):
     else:
         
         loss_info_nce = args.lambda_info_nce * compute_info_nce_loss3(
-            img_slot_out['slots'][:, 0, :], # Target image slot
-            aud_slot_out['slots'][:, 0, :], # Target audio slot
+            img_slot_out['slots_sorted'][:, 0, :], # Target image slot
+            aud_slot_out['slots_sorted'][:, 0, :], # Target audio slot
             temperature=args.tau # Temperature for InfoNCE loss
         )
 
