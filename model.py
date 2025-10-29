@@ -20,6 +20,10 @@ class EZVSL(nn.Module):
         self.imgnet.avgpool = nn.Identity()
         self.imgnet.fc = nn.Identity()
         self.img_conv1d = nn.Conv1d(512, dim, kernel_size=1)
+        
+        if self.args.visual_dropout == 'True':
+            # Heavy visual dropout (SLAVC-style)
+            self.visual_dropout = nn.Dropout(p=self.args.visual_dropout_ratio)
 
         # Audio model
         self.audnet = resnet18()
@@ -102,6 +106,11 @@ class EZVSL(nn.Module):
     def forward(self, image, audio):
         # Image
         img = self.imgnet(image).unflatten(1, (512, 49))
+        
+        if self.args.visual_dropout == 'True':
+            # Apply dropout to the image features
+            img = self.visual_dropout(img)
+        
         img_maxpool = img.max(dim=-1).values
         img_maxpool = self.img_conv1d(img_maxpool.unsqueeze(-1)).squeeze(-1)
         img_maxpool = nn.functional.normalize(img_maxpool, dim=1)

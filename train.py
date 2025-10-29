@@ -74,6 +74,8 @@ def get_arguments():
     # training/evaluation parameters
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
     parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
+    parser.add_argument('--visual_dropout', type=str, default='False', help='visual dropout')
+    parser.add_argument('--visual_dropout_ratio', type=float, default=0.7, help='visual dropout ratio')
     parser.add_argument('--image_augmentations', type=str, default='ssltie', help='["No", "ssltie", "ezvsl"]')
     parser.add_argument('--audio_augmentations', type=str, default='ssltie', help='["No", "ssltie"]')
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")
@@ -255,10 +257,10 @@ def main_worker(gpu, ngpus_per_node, args):
     # Log visualizations for initial validation (only on rank 0)
     if args.wandb == 'True':
         if hasattr(args, 'train_log_files') and args.train_log_files:
-            print(f'    Logging initial train visualizations for epoch {start_epoch}...')
+            # print(f'    Logging initial train visualizations for epoch {start_epoch}...')
             log_file_visualizations(traindataset, model, args.train_log_files, 'train', start_epoch, args)
         if hasattr(args, 'val_log_files') and args.val_log_files:
-            print(f'    Logging initial validation visualizations for epoch {start_epoch}...')
+            # print(f'    Logging initial validation visualizations for epoch {start_epoch}...')
             log_file_visualizations(testdataset, model, args.val_log_files, 'val', start_epoch, args)
         
     best_loss_info_nce = loss_info_nce
