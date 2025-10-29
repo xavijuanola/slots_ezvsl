@@ -295,7 +295,7 @@ def main_worker(gpu, ngpus_per_node, args):
             print(f'    AUC (epoch {epoch}): {auc:.4f}')
 
         # Log visualizations for specified files after epoch completion (only on rank 0)
-        if args.wandb == 'True' and args.rank == 0:
+        if args.wandb == 'True':
             if hasattr(args, 'train_log_files') and args.train_log_files:
                 print(f'    Logging train visualizations for epoch {epoch}...')
                 log_file_visualizations(traindataset, model, args.train_log_files, 'train', epoch, args)
@@ -388,70 +388,80 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
         aud_slot_out, img_slot_out = model(image.float(), spec.float())
         
         if args.slots_maxsim == 'True':
-            # Find which is the positive slot based on maximum similarity
             aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
             img_slots = F.normalize(img_slot_out['slots'], dim=1)
             
-            # Compute all pairwise similarities between audio and image slots across the batch: [B, B, N, N]
-            similarity_slots = torch.einsum('bnc,vmc->bvnm', aud_slots, img_slots)
-            
-            # For each pair (b, v), find the (audio slot, image slot) that has the maximum similarity
-            # max_indices: [B, B, 2], where [:,:,0]=audio slot index, [:,:,1]=image slot index
-            max_similarities, flat_indices = similarity_slots.reshape(similarity_slots.shape[0], similarity_slots.shape[1], -1).max(dim=-1)
-            audio_slot_indices = flat_indices // similarity_slots.shape[3]
-            image_slot_indices = flat_indices % similarity_slots.shape[3]
-            max_slot_indices = torch.stack([audio_slot_indices, image_slot_indices], dim=-1)  # Shape: [B, B, 2] (audio slot idx, image slot idx)
-            
-            # Select the target and off-target slots for each pair in the batch based on max_slot_indices
-            # aud_slots: [B, N, C], img_slots: [B, N, C]
+            # Compute all pairwise similarities between audio and image slots across the batch: [B, N, N]
+            similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)  # [B, N, M]
+            # For each element in the batch, find (n,m) indices where similarity is maximum
+            max_sim_indices = similarity_slots.reshape(similarity_slots.shape[0], -1).argmax(dim=1)  # [B]
+            target_audio_indices = max_sim_indices // similarity_slots.shape[2]  # n (slot of audio)
+            target_image_indices = max_sim_indices % similarity_slots.shape[2]   # m (slot of image)
+            # Stack to get indices per batch: shape [B, 2], where [:,0] is audio, [:,1] is image slot index of max sim
+            max_slot_indices = torch.stack([target_audio_indices, target_image_indices], dim=1)
+
             B, N, C = aud_slots.shape
 
-            # Prepare for all pairs: for [b, v], get their "target" slot indices
-            # Gather target audio slots across the batch
+            # Prepare for correct slot sorting based on new max_slot_indices layout
             batch_indices = torch.arange(B, device=aud_slots.device)
-            # For each pair (b,v): v is the image index, b is the audio index
 
-            # Reordenar los slots para que el target esté en la posición 0 y el off-target en la posición 1
+            # For audio: for each example b, use audio slot index for (b,b) and (b,(b+1)%B)
+            aud_target_slot_idx = []
+            aud_offtarget_slot_idx = []
+            
+            img_target_slot_idx = []
+            img_offtarget_slot_idx = []
+            
+            for b in range(B):
+                aud_target_slot_idx.append(max_slot_indices[b, 0])
+                if max_slot_indices[b, 0] == 0:
+                    aud_offtarget_slot_idx.append(1)
+                else:
+                    aud_offtarget_slot_idx.append(0)
+                    
+                img_target_slot_idx.append(max_slot_indices[b, 1])
+                if max_slot_indices[b, 1] == 0:
+                    img_offtarget_slot_idx.append(1)
+                else:
+                    img_offtarget_slot_idx.append(0)
+
             aud_slot_out['slots_sorted'] = torch.stack([
-                aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target slot
-                aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target slot
+                aud_slot_out['slots'][batch_indices, aud_target_slot_idx],
+                aud_slot_out['slots'][batch_indices, aud_offtarget_slot_idx]
             ], dim=1)
 
             img_slot_out['slots_sorted'] = torch.stack([
-                img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target slot
-                img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target slot
+                img_slot_out['slots'][batch_indices, img_target_slot_idx],
+                img_slot_out['slots'][batch_indices, img_offtarget_slot_idx]
             ], dim=1)
-
-            # Reordenar los tensores 'q' y 'attn' de manera similar
+            
             aud_slot_out['q_sorted'] = torch.stack([
-                aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target q
-                aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target q
+                aud_slot_out['q'][batch_indices, aud_target_slot_idx],
+                aud_slot_out['q'][batch_indices, aud_offtarget_slot_idx]
             ], dim=1)
 
             img_slot_out['q_sorted'] = torch.stack([
-                img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target q
-                img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target q
+                img_slot_out['q'][batch_indices, img_target_slot_idx],
+                img_slot_out['q'][batch_indices, img_offtarget_slot_idx]
             ], dim=1)
 
-            # Reordenar los tensores 'attn' de manera similar
             aud_slot_out['attn_sorted'] = torch.stack([
-                aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target attn
-                aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target attn
+                aud_slot_out['intra_attn'][batch_indices, aud_target_slot_idx],
+                aud_slot_out['intra_attn'][batch_indices, aud_offtarget_slot_idx]
             ], dim=1)
 
             img_slot_out['attn_sorted'] = torch.stack([
-                img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target attn
-                img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target attn
+                img_slot_out['intra_attn'][batch_indices, img_target_slot_idx],
+                img_slot_out['intra_attn'][batch_indices, img_offtarget_slot_idx]
             ], dim=1)
+
         else:
             aud_slot_out['slots_sorted'] = aud_slot_out['slots']
             img_slot_out['slots_sorted'] = img_slot_out['slots']
 
-            # Reordenar los tensores 'q' y 'attn' de manera similar
             aud_slot_out['q_sorted'] = aud_slot_out['q']
             img_slot_out['q_sorted'] = img_slot_out['q']
-
-            # Reordenar los tensores 'attn' de manera similar
+            
             aud_slot_out['attn_sorted'] = aud_slot_out['intra_attn']
             img_slot_out['attn_sorted'] = img_slot_out['intra_attn']
         
@@ -592,70 +602,80 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
             aud_slot_out, img_slot_out = model(image.float(), spec.float())
             
             if args.slots_maxsim == 'True':
-                # Find which is the positive slot based on maximum similarity
                 aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
                 img_slots = F.normalize(img_slot_out['slots'], dim=1)
                 
-                # Compute all pairwise similarities between audio and image slots across the batch: [B, B, N, N]
-                similarity_slots = torch.einsum('bnc,vmc->bvnm', aud_slots, img_slots)
-                
-                # For each pair (b, v), find the (audio slot, image slot) that has the maximum similarity
-                # max_indices: [B, B, 2], where [:,:,0]=audio slot index, [:,:,1]=image slot index
-                max_similarities, flat_indices = similarity_slots.reshape(similarity_slots.shape[0], similarity_slots.shape[1], -1).max(dim=-1)
-                audio_slot_indices = flat_indices // similarity_slots.shape[3]
-                image_slot_indices = flat_indices % similarity_slots.shape[3]
-                max_slot_indices = torch.stack([audio_slot_indices, image_slot_indices], dim=-1)  # Shape: [B, B, 2] (audio slot idx, image slot idx)
-                
-                # Select the target and off-target slots for each pair in the batch based on max_slot_indices
-                # aud_slots: [B, N, C], img_slots: [B, N, C]
+                # Compute all pairwise similarities between audio and image slots across the batch: [B, N, N]
+                similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)  # [B, N, M]
+                # For each element in the batch, find (n,m) indices where similarity is maximum
+                max_sim_indices = similarity_slots.reshape(similarity_slots.shape[0], -1).argmax(dim=1)  # [B]
+                target_audio_indices = max_sim_indices // similarity_slots.shape[2]  # n (slot of audio)
+                target_image_indices = max_sim_indices % similarity_slots.shape[2]   # m (slot of image)
+                # Stack to get indices per batch: shape [B, 2], where [:,0] is audio, [:,1] is image slot index of max sim
+                max_slot_indices = torch.stack([target_audio_indices, target_image_indices], dim=1)
+
                 B, N, C = aud_slots.shape
 
-                # Prepare for all pairs: for [b, v], get their "target" slot indices
-                # Gather target audio slots across the batch
+                # Prepare for correct slot sorting based on new max_slot_indices layout
                 batch_indices = torch.arange(B, device=aud_slots.device)
-                # For each pair (b,v): v is the image index, b is the audio index
 
-                # Reordenar los slots para que el target esté en la posición 0 y el off-target en la posición 1
+                # For audio: for each example b, use audio slot index for (b,b) and (b,(b+1)%B)
+                aud_target_slot_idx = []
+                aud_offtarget_slot_idx = []
+                
+                img_target_slot_idx = []
+                img_offtarget_slot_idx = []
+                
+                for b in range(B):
+                    aud_target_slot_idx.append(max_slot_indices[b, 0])
+                    if max_slot_indices[b, 0] == 0:
+                        aud_offtarget_slot_idx.append(1)
+                    else:
+                        aud_offtarget_slot_idx.append(0)
+                        
+                    img_target_slot_idx.append(max_slot_indices[b, 1])
+                    if max_slot_indices[b, 1] == 0:
+                        img_offtarget_slot_idx.append(1)
+                    else:
+                        img_offtarget_slot_idx.append(0)
+
                 aud_slot_out['slots_sorted'] = torch.stack([
-                    aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target slot
-                    aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target slot
+                    aud_slot_out['slots'][batch_indices, aud_target_slot_idx],
+                    aud_slot_out['slots'][batch_indices, aud_offtarget_slot_idx]
                 ], dim=1)
 
                 img_slot_out['slots_sorted'] = torch.stack([
-                    img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target slot
-                    img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target slot
+                    img_slot_out['slots'][batch_indices, img_target_slot_idx],
+                    img_slot_out['slots'][batch_indices, img_offtarget_slot_idx]
                 ], dim=1)
-
-                # Reordenar los tensores 'q' y 'attn' de manera similar
+                
                 aud_slot_out['q_sorted'] = torch.stack([
-                    aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target q
-                    aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target q
+                    aud_slot_out['q'][batch_indices, aud_target_slot_idx],
+                    aud_slot_out['q'][batch_indices, aud_offtarget_slot_idx]
                 ], dim=1)
 
                 img_slot_out['q_sorted'] = torch.stack([
-                    img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target q
-                    img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target q
+                    img_slot_out['q'][batch_indices, img_target_slot_idx],
+                    img_slot_out['q'][batch_indices, img_offtarget_slot_idx]
                 ], dim=1)
 
-                # Reordenar los tensores 'attn' de manera similar
                 aud_slot_out['attn_sorted'] = torch.stack([
-                    aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target attn
-                    aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target attn
+                    aud_slot_out['intra_attn'][batch_indices, aud_target_slot_idx],
+                    aud_slot_out['intra_attn'][batch_indices, aud_offtarget_slot_idx]
                 ], dim=1)
 
                 img_slot_out['attn_sorted'] = torch.stack([
-                    img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target attn
-                    img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target attn
+                    img_slot_out['intra_attn'][batch_indices, img_target_slot_idx],
+                    img_slot_out['intra_attn'][batch_indices, img_offtarget_slot_idx]
                 ], dim=1)
+
             else:
                 aud_slot_out['slots_sorted'] = aud_slot_out['slots']
                 img_slot_out['slots_sorted'] = img_slot_out['slots']
 
-                # Reordenar los tensores 'q' y 'attn' de manera similar
                 aud_slot_out['q_sorted'] = aud_slot_out['q']
                 img_slot_out['q_sorted'] = img_slot_out['q']
-
-                # Reordenar los tensores 'attn' de manera similar
+                
                 aud_slot_out['attn_sorted'] = aud_slot_out['intra_attn']
                 img_slot_out['attn_sorted'] = img_slot_out['intra_attn']
             
@@ -768,97 +788,89 @@ def validate(test_loader, model, args, epoch):
                 aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
                 img_slots = F.normalize(img_slot_out['slots'], dim=1)
                 
-                # Compute all pairwise similarities between audio and image slots across the batch: [B, B, N, N]
-                similarity_slots = torch.einsum('bnc,vmc->bvnm', aud_slots, img_slots)
-                
-                # For each pair (b, v), find the (audio slot, image slot) that has the maximum similarity
-                # max_indices: [B, B, 2], where [:,:,0]=audio slot index, [:,:,1]=image slot index
-                max_similarities, flat_indices = similarity_slots.reshape(similarity_slots.shape[0], similarity_slots.shape[1], -1).max(dim=-1)
-                audio_slot_indices = flat_indices // similarity_slots.shape[3]
-                image_slot_indices = flat_indices % similarity_slots.shape[3]
-                max_slot_indices = torch.stack([audio_slot_indices, image_slot_indices], dim=-1)  # Shape: [B, B, 2] (audio slot idx, image slot idx)
-                
-                # Select the target and off-target slots for each pair in the batch based on max_slot_indices
-                # aud_slots: [B, N, C], img_slots: [B, N, C]
+                # Compute all pairwise similarities between audio and image slots across the batch: [B, N, N]
+                similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)  # [B, N, M]
+                # For each element in the batch, find (n,m) indices where similarity is maximum
+                max_sim_indices = similarity_slots.reshape(similarity_slots.shape[0], -1).argmax(dim=1)  # [B]
+                target_audio_indices = max_sim_indices // similarity_slots.shape[2]  # n (slot of audio)
+                target_image_indices = max_sim_indices % similarity_slots.shape[2]   # m (slot of image)
+                # Stack to get indices per batch: shape [B, 2], where [:,0] is audio, [:,1] is image slot index of max sim
+                max_slot_indices = torch.stack([target_audio_indices, target_image_indices], dim=1)
+
                 B, N, C = aud_slots.shape
 
-                # Prepare for all pairs: for [b, v], get their "target" slot indices
-                # Gather target audio slots across the batch
+                # Prepare for correct slot sorting based on new max_slot_indices layout
                 batch_indices = torch.arange(B, device=aud_slots.device)
-                # For each pair (b,v): v is the image index, b is the audio index
 
-                # Reordenar los slots para que el target esté en la posición 0 y el off-target en la posición 1
+                # For audio: for each example b, use audio slot index for (b,b) and (b,(b+1)%B)
+                aud_target_slot_idx = []
+                aud_offtarget_slot_idx = []
+                
+                img_target_slot_idx = []
+                img_offtarget_slot_idx = []
+                
+                for b in range(B):
+                    aud_target_slot_idx.append(max_slot_indices[b, 0])
+                    if max_slot_indices[b, 0] == 0:
+                        aud_offtarget_slot_idx.append(1)
+                    else:
+                        aud_offtarget_slot_idx.append(0)
+                        
+                    img_target_slot_idx.append(max_slot_indices[b, 1])
+                    if max_slot_indices[b, 1] == 0:
+                        img_offtarget_slot_idx.append(1)
+                    else:
+                        img_offtarget_slot_idx.append(0)
+                        
+                # aud_target_slot_idx = max_slot_indices[batch_indices, 0]  # shape: [B]
+                # aud_offtarget_slot_idx = max_slot_indices[(batch_indices + 1) % B, 0]
+
+                # # For image: use image slot index for (b,b) and (b,(b+1)%B)
+                # img_target_slot_idx = max_slot_indices[batch_indices, 1]  # shape: [B]
+                # img_offtarget_slot_idx = max_slot_indices[(batch_indices + 1) % B, 1]
+
                 aud_slot_out['slots_sorted'] = torch.stack([
-                    aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target slot
-                    aud_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target slot
+                    aud_slot_out['slots'][batch_indices, aud_target_slot_idx],
+                    aud_slot_out['slots'][batch_indices, aud_offtarget_slot_idx]
                 ], dim=1)
 
                 img_slot_out['slots_sorted'] = torch.stack([
-                    img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target slot
-                    img_slot_out['slots'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target slot
+                    img_slot_out['slots'][batch_indices, img_target_slot_idx],
+                    img_slot_out['slots'][batch_indices, img_offtarget_slot_idx]
                 ], dim=1)
-
-                # Reordenar los tensores 'q' y 'attn' de manera similar
-                aud_slot_out['q_sorted'] = torch.stack([
-                    aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target q
-                    aud_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target q
-                ], dim=1)
-
-                img_slot_out['q_sorted'] = torch.stack([
-                    img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target q
-                    img_slot_out['q'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target q
-                ], dim=1)
-
-                # Reordenar los tensores 'attn' de manera similar
-                aud_slot_out['attn_sorted'] = torch.stack([
-                    aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 0]],  # Target attn
-                    aud_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 0]]  # Off-target attn
-                ], dim=1)
-
-                img_slot_out['attn_sorted'] = torch.stack([
-                    img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, batch_indices, 1]],  # Target attn
-                    img_slot_out['intra_attn'][batch_indices, max_slot_indices[batch_indices, (batch_indices + 1) % B, 1]]  # Off-target attn
-                ], dim=1)
+                
             else:
                 aud_slot_out['slots_sorted'] = aud_slot_out['slots']
                 img_slot_out['slots_sorted'] = img_slot_out['slots']
-
-                # Reordenar los tensores 'q' y 'attn' de manera similar
-                aud_slot_out['q_sorted'] = aud_slot_out['q']
-                img_slot_out['q_sorted'] = img_slot_out['q']
-
-                # Reordenar los tensores 'attn' de manera similar
-                aud_slot_out['attn_sorted'] = aud_slot_out['intra_attn']
-                img_slot_out['attn_sorted'] = img_slot_out['intra_attn']
             
             loss_info_nce = compute_loss(img_slot_out, aud_slot_out, args, mode='val')
             avg_loss.update(loss_info_nce.item())
 
-            # Cross-modal Attention
-            cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q_sorted'], img_slot_out['k']) * (512 ** -0.5)
-            cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
-            h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
-            cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).contiguous().view(B, 2, h, w)
-            cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
+            # # Cross-modal Attention
+            # cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q_sorted'], img_slot_out['k']) * (512 ** -0.5)
+            # cross_modal_attention_ai = cross_modal_attention_ai.softmax(dim=1) + 1e-8
+            # h = w = int(cross_modal_attention_ai.shape[-1] ** 0.5)
+            # cross_modal_attention_ai = (cross_modal_attention_ai / cross_modal_attention_ai.sum(dim=-1, keepdim=True)).contiguous().view(B, 2, h, w)
+            # cross_modal_attention_ai = F.interpolate(cross_modal_attention_ai, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
-            cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q_sorted'], aud_slot_out['k']) * (512 ** -0.5)
-            cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
-            cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True)).contiguous()
-            cross_modal_attention_ia = F.interpolate(cross_modal_attention_ia, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
+            # cross_modal_attention_ia = torch.einsum('bid,bjd->bij', img_slot_out['q_sorted'], aud_slot_out['k']) * (512 ** -0.5)
+            # cross_modal_attention_ia = cross_modal_attention_ia.softmax(dim=1) + 1e-8
+            # cross_modal_attention_ia = (cross_modal_attention_ia / cross_modal_attention_ia.sum(dim=-1, keepdim=True)).contiguous()
+            # cross_modal_attention_ia = F.interpolate(cross_modal_attention_ia, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
-            # Intra-modal Attention
-            intra_modal_attention_i = img_slot_out['attn_sorted'].contiguous().view(B, 2, h, w)
-            intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
+            # # Intra-modal Attention
+            # intra_modal_attention_i = img_slot_out['attn_sorted'].contiguous().view(B, 2, h, w)
+            # intra_modal_attention_i = F.interpolate(intra_modal_attention_i, size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
             
-            intra_modal_attention_a = aud_slot_out['attn_sorted'].contiguous().view(B, 2, 7)
-            intra_modal_attention_a = F.interpolate(intra_modal_attention_a, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
+            # intra_modal_attention_a = aud_slot_out['attn_sorted'].contiguous().view(B, 2, 7)
+            # intra_modal_attention_a = F.interpolate(intra_modal_attention_a, size=200, mode='linear', align_corners=False).unsqueeze(2).repeat(1, 1, 257, 1).data.cpu().numpy()  # (B, 2, 257, 200)
             
-            # Similarity Embeddings
-            img_emb = F.normalize(img_slot_out['embedding_original'].contiguous().view(B, 512, h, w), dim=1)
-            aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
+            # # Similarity Embeddings
+            # img_emb = F.normalize(img_slot_out['embedding_original'].contiguous().view(B, 512, h, w), dim=1)
+            # aud_emb = F.normalize(aud_slot_out['embedding_original'], dim=1)
 
-            similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
-            similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
+            # similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
+            # similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).cpu().numpy()
                         
             # Log current loss
             if args.wandb == 'True':
