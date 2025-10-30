@@ -5,6 +5,7 @@ __pycache__/
 
 wandb/
 checkpoints/
+debug_logs/
 
 # C extensions
 *.so

@@ -713,6 +713,14 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
             similarity_embeddings = torch.einsum('bihw,bi->bhw', img_emb, aud_emb)
             similarity_embeddings = F.interpolate(similarity_embeddings.unsqueeze(1), size=(224, 224), mode='bilinear', align_corners=False).data.cpu().numpy()
             
+            # Also keep original-resolution (7x7) attentions for image/audio to log overlays at "attention-native" size
+            img_intra_attn_7 = img_slot_out['attn_sorted'].contiguous().view(B, 2, h, w).data.cpu().numpy()  # (B,2,7,7)
+            img_cross_attn_7 = img_slot_out['cross_attn'].contiguous().view(B, 2, h, w).data.cpu().numpy()  # (B,2,7,7)
+            aud_intra_attn_7 = aud_slot_out['attn_sorted'].contiguous().view(B, 2, 7, 1).repeat(1, 1, 1, 7).data.cpu().numpy()  # (B,2,7,7)
+            aud_cross_attn_7 = aud_slot_out['cross_attn'].contiguous().view(B, 2, 7, 1).repeat(1, 1, 1, 7).data.cpu().numpy()  # (B,2,7,7)
+
+            import cv2
+
             # Log visualizations for each sample
             for i in range(B):
                 # Get original image and spectrogram
@@ -726,6 +734,11 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 fig_similarity = gen_pred_figure(orig_img, similarity_embeddings_target)
                 wandb.log({f"{filename[i]}_{mode}/similarity": wandb.Image(fig_similarity), 'epoch': epoch})
+                if args.debug =='True':
+                    dir_path = os.path.join('debug_logs', f'img_sim', mode, f'{filename[i]}')
+                    os.makedirs(dir_path, exist_ok=True)
+                    imsim_path = os.path.join(dir_path, f'ep_{epoch}.jpg')
+                    plt.savefig(imsim_path)
                 plt.close(fig_similarity)
                 
                 intra_modal_image_target = utils.normalize_img(intra_modal_attention_image[i, 0])
@@ -733,6 +746,11 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 fig_intramodal = gen_pred_figure(orig_img, intra_modal_image_target, intra_modal_image_offtarget)
                 wandb.log({f"{filename[i]}_{mode}/intramodal_image": wandb.Image(fig_intramodal), 'epoch': epoch})
+                if args.debug =='True':
+                    dir_path = os.path.join('debug_logs', f'img_intramodal', mode, f'{filename[i]}')
+                    os.makedirs(dir_path, exist_ok=True)
+                    im_intramodal_path = os.path.join(dir_path, f'ep_{epoch}.jpg')
+                    plt.savefig(im_intramodal_path)
                 plt.close(fig_intramodal)
                 
                 crossmodal_image_target = utils.normalize_img(cross_modal_attention_image[i, 0])
@@ -740,6 +758,11 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 fig_crossmodal_image = gen_pred_figure(orig_img, crossmodal_image_target, crossmodal_image_offtarget)
                 wandb.log({f"{filename[i]}_{mode}/crossmodal_image": wandb.Image(fig_crossmodal_image), 'epoch': epoch})
+                if args.debug =='True':
+                    dir_path = os.path.join('debug_logs', f'img_crossmodal', mode, f'{filename[i]}')
+                    os.makedirs(dir_path, exist_ok=True)
+                    im_crossmodal_path = os.path.join(dir_path, f'ep_{epoch}.jpg')
+                    plt.savefig(im_crossmodal_path)
                 plt.close(fig_crossmodal_image)
                 
                 # Audio logs
@@ -749,6 +772,11 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 ax.set_title('Spectrogram')
                 ax.axis('off')
                 wandb.log({f"{filename[i]}_{mode}/spectrogram": wandb.Image(fig_spectrogram), 'epoch': epoch})
+                if args.debug =='True':
+                    dir_path = os.path.join('debug_logs', f'spec', mode, f'{filename[i]}')
+                    os.makedirs(dir_path, exist_ok=True)
+                    spectrogram_path = os.path.join(dir_path, f'ep_{epoch}.jpg')
+                    plt.savefig(spectrogram_path)
                 plt.close(fig_spectrogram)
                 
                 intra_modal_audio_target = utils.normalize_img(intra_modal_attention_audio[i, 0])
@@ -756,6 +784,11 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 fig_intramodal_audio = gen_spec_pred_figure(orig_spec, intra_modal_audio_target, intra_modal_audio_offtarget)
                 wandb.log({f"{filename[i]}_{mode}/intramodal_audio": wandb.Image(fig_intramodal_audio), 'epoch': epoch})
+                if args.debug =='True':
+                    dir_path = os.path.join('debug_logs', f'aud_intramodal', mode, f'{filename[i]}')
+                    os.makedirs(dir_path, exist_ok=True)
+                    aud_intramodal_path = os.path.join(dir_path, f'ep_{epoch}.jpg')
+                    plt.savefig(aud_intramodal_path)
                 plt.close(fig_intramodal_audio)
                 
                 crossmodal_audio_target = utils.normalize_img(cross_modal_attention_audio[i, 0])
@@ -763,7 +796,42 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 fig_crossmodal_audio = gen_spec_pred_figure(orig_spec, crossmodal_audio_target, crossmodal_audio_offtarget)
                 wandb.log({f"{filename[i]}_{mode}/crossmodal_audio": wandb.Image(fig_crossmodal_audio), 'epoch': epoch})
+                if args.debug =='True':
+                    dir_path =  os.path.join('debug_logs', f'aud_crossmodal', mode, f'{filename[i]}')
+                    os.makedirs(dir_path, exist_ok=True)
+                    aud_crossmodal_path = os.path.join(dir_path, f'ep_{epoch}.jpg')
+                    plt.savefig(aud_crossmodal_path)
                 plt.close(fig_crossmodal_audio)
+
+                # ============================================================
+                # NEW: "native attention size" logs
+                # - Image resized to 7x7 for image-attn overlays
+                # - Spectrogram resized to 7x7 for audio-attn overlays
+                # ============================================================
+                img7 = cv2.resize(orig_img, (7, 7), interpolation=cv2.INTER_AREA)
+                img7_up = cv2.resize(img7, (224, 224), interpolation=cv2.INTER_NEAREST)  # for display
+
+                spec7 = cv2.resize(orig_spec, (7, 7), interpolation=cv2.INTER_AREA)
+                spec7_up = cv2.resize(spec7, (257, 200), interpolation=cv2.INTER_NEAREST)  # for display
+
+                # Image-side native overlays (use 7x7 attention, upscale to 224 for the helper)
+                img_intra7_t = utils.normalize_img(img_intra_attn_7[i, 0])
+                img_intra7_o = utils.normalize_img(img_intra_attn_7[i, 1])
+                img_cross7_t = utils.normalize_img(img_cross_attn_7[i, 0])
+                img_cross7_o = utils.normalize_img(img_cross_attn_7[i, 1])
+
+                img_intra7_t_up = cv2.resize(img_intra7_t, (224, 224), interpolation=cv2.INTER_NEAREST)
+                img_intra7_o_up = cv2.resize(img_intra7_o, (224, 224), interpolation=cv2.INTER_NEAREST)
+                img_cross7_t_up = cv2.resize(img_cross7_t, (224, 224), interpolation=cv2.INTER_NEAREST)
+                img_cross7_o_up = cv2.resize(img_cross7_o, (224, 224), interpolation=cv2.INTER_NEAREST)
+
+                fig_img7_intra = gen_pred_figure(img7_up, img_intra7_t_up, img_intra7_o_up)
+                wandb.log({f"{filename[i]}_{mode}/intramodal_image_native7x7": wandb.Image(fig_img7_intra), 'epoch': epoch})
+                plt.close(fig_img7_intra)
+
+                fig_img7_cross = gen_pred_figure(img7_up, img_cross7_t_up, img_cross7_o_up)
+                wandb.log({f"{filename[i]}_{mode}/crossmodal_image_native7x7": wandb.Image(fig_img7_cross), 'epoch': epoch})
+                plt.close(fig_img7_cross)
 
 
 def validate(test_loader, model, args, epoch):

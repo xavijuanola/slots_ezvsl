@@ -127,14 +127,16 @@ class EZVSL(nn.Module):
         mu = self.slots_mu.expand(b, self.args.num_slots, -1) 
         sigma = self.slots_logsigma.exp().expand(b, self.args.num_slots, -1) 
         slots = mu + sigma * torch.randn(mu.shape, device = device, dtype = dtype) 
+        slots_image = slots.clone()
+        slots_audio = slots.clone()
 
         # Slot Attention
         if self.args.n_attention_modules == 1:
-            img_slot_out = self.slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots)
-            aud_slot_out = self.slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots)
+            img_slot_out = self.slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
+            aud_slot_out = self.slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
         else:
-            img_slot_out = self.image_slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots)
-            aud_slot_out = self.audio_slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots)
+            img_slot_out = self.image_slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
+            aud_slot_out = self.audio_slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
 
         img_recon = self.img_slot_decoder(img_slot_out['slots'].contiguous().view((img_slot_out['slots'].shape[0], -1)))
         aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].contiguous().view((aud_slot_out['slots'].shape[0], -1)))

@@ -29,4 +29,4 @@ python train.py \
     --lambda_div 0.1 \
     --lambda_recon 0.1 \
     --epochs 200 \
-    --init_lr 1e-4
+    --init_lr 1e-3
