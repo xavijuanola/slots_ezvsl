@@ -66,11 +66,11 @@
                 "--lambda_info_nce",
                 "1.0",
                 "--lambda_match",
-                "0.0",
+                "100.0",
                 "--lambda_recon",
                 "0.1",
                 "--lambda_div",
-                "0.0",
+                "0.1",
             ]
         }
     ]

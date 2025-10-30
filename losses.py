@@ -1,5 +1,27 @@
 import torch
 import torch.nn.functional as F
+ 
+def permutation_consistency_loss(p_audio: torch.Tensor,
+                                 y_audio_hard: torch.Tensor,
+                                 p_image: torch.Tensor,
+                                 y_image_hard: torch.Tensor) -> torch.Tensor:
+    """
+    Encourage the soft permutation probabilities to match the hard choices (N=2).
+
+    Args:
+        p_audio: Probability that audio slot 1 is selected as the first slot. Shape [B].
+        y_audio_hard: 0/1 hard decision for audio (detached). Shape [B].
+        p_image: Probability that image slot 1 is selected as the first slot. Shape [B].
+        y_image_hard: 0/1 hard decision for image (detached). Shape [B].
+
+    Returns:
+        Scalar BCE loss summed over audio and image selections.
+    """
+    y_audio_hard = y_audio_hard.float()
+    y_image_hard = y_image_hard.float()
+    loss_a = F.binary_cross_entropy(p_audio, y_audio_hard)
+    loss_i = F.binary_cross_entropy(p_image, y_image_hard)
+    return loss_a + loss_i
 
 def compute_matching_loss(intra_modal_attention_i, cross_modal_attention_ai, intra_modal_attention_a, cross_modal_attention_ia):
     # Cross-modal attention 

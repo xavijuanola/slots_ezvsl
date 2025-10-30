@@ -16,7 +16,7 @@ import wandb
 
 import utils
 from model import EZVSL
-from losses import compute_loss
+from losses import compute_loss, permutation_consistency_loss
 from datasets import get_train_dataset, get_test_dataset, get_train_test_dataset
 from torch.optim.lr_scheduler import LinearLR, ReduceLROnPlateau, SequentialLR
 
@@ -71,6 +71,8 @@ def get_arguments():
     parser.add_argument('--lambda_match', default=100.0, type=float)
     parser.add_argument('--lambda_div', default=0.1, type=float)
     parser.add_argument('--lambda_recon', default=0.1, type=float)
+    parser.add_argument('--use_perm_reg', default='False', type=str, help='Use permutation consistency regularizer')
+    parser.add_argument('--lambda_perm', default=0.01, type=float, help='Weight for permutation consistency regularizer')
 
     # training/evaluation parameters
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
@@ -388,72 +390,63 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
         aud_slot_out, img_slot_out = model(image.float(), spec.float())
         
         if args.slots_maxsim == 'True':
-            aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
-            img_slots = F.normalize(img_slot_out['slots'], dim=1)
+            # Normalize per-slot vectors on channel dim
+            aud_slots = F.normalize(aud_slot_out['slots'], dim=2)
+            img_slots = F.normalize(img_slot_out['slots'], dim=2)
             
-            # Compute all pairwise similarities between audio and image slots across the batch: [B, N, N]
-            similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)  # [B, N, M]
-            # For each element in the batch, find (n,m) indices where similarity is maximum
-            max_sim_indices = similarity_slots.reshape(similarity_slots.shape[0], -1).argmax(dim=1)  # [B]
-            target_audio_indices = max_sim_indices // similarity_slots.shape[2]  # n (slot of audio)
-            target_image_indices = max_sim_indices % similarity_slots.shape[2]   # m (slot of image)
-            # Stack to get indices per batch: shape [B, 2], where [:,0] is audio, [:,1] is image slot index of max sim
-            max_slot_indices = torch.stack([target_audio_indices, target_image_indices], dim=1)
+            # Pairwise similarity S[b, n_a, n_i]
+            similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)
 
             B, N, C = aud_slots.shape
+            assert N == 2, "STE sort implemented for num_slots=2"
 
-            # Prepare for correct slot sorting based on new max_slot_indices layout
-            batch_indices = torch.arange(B, device=aud_slots.device)
+            # Audio STE permutation (choose which audio slot is best)
+            a0_best = similarity_slots[:, 0, :].max(dim=1).values
+            a1_best = similarity_slots[:, 1, :].max(dim=1).values
+            logits_a = (a1_best - a0_best) / 0.3
+            p_a = torch.sigmoid(logits_a)
+            P_a_soft = torch.stack([
+                torch.stack([1 - p_a, p_a], dim=1),
+                torch.stack([p_a, 1 - p_a], dim=1)
+            ], dim=1)
+            a_choose1 = (p_a > 0.5).long()
+            P_a_hard = torch.zeros_like(P_a_soft)
+            P_a_hard[torch.arange(B, device=P_a_soft.device), 0, a_choose1] = 1
+            P_a_hard[torch.arange(B, device=P_a_soft.device), 1, 1 - a_choose1] = 1
+            P_a = P_a_hard.detach() - P_a_soft.detach() + P_a_soft
 
-            # For audio: for each example b, use audio slot index for (b,b) and (b,(b+1)%B)
-            aud_target_slot_idx = []
-            aud_offtarget_slot_idx = []
+            # Image STE permutation (choose which image slot is best)
+            i0_best = similarity_slots[:, :, 0].max(dim=1).values
+            i1_best = similarity_slots[:, :, 1].max(dim=1).values
+            logits_i = (i1_best - i0_best) / 0.3
+            p_i = torch.sigmoid(logits_i)
+            P_i_soft = torch.stack([
+                torch.stack([1 - p_i, p_i], dim=1),
+                torch.stack([p_i, 1 - p_i], dim=1)
+            ], dim=1)
+            i_choose1 = (p_i > 0.5).long()
+            P_i_hard = torch.zeros_like(P_i_soft)
+            P_i_hard[torch.arange(B, device=P_i_soft.device), 0, i_choose1] = 1
+            P_i_hard[torch.arange(B, device=P_i_soft.device), 1, 1 - i_choose1] = 1
+            P_i = P_i_hard.detach() - P_i_soft.detach() + P_i_soft
+
+            # Reorder without mixing in forward
+            aud_slot_out['slots_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['slots'])
+            img_slot_out['slots_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['slots'])
             
-            img_target_slot_idx = []
-            img_offtarget_slot_idx = []
+            aud_slot_out['q_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['q'])
+            img_slot_out['q_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['q'])
             
-            for b in range(B):
-                aud_target_slot_idx.append(max_slot_indices[b, 0])
-                if max_slot_indices[b, 0] == 0:
-                    aud_offtarget_slot_idx.append(1)
-                else:
-                    aud_offtarget_slot_idx.append(0)
-                    
-                img_target_slot_idx.append(max_slot_indices[b, 1])
-                if max_slot_indices[b, 1] == 0:
-                    img_offtarget_slot_idx.append(1)
-                else:
-                    img_offtarget_slot_idx.append(0)
+            aud_slot_out['attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['intra_attn'])
+            img_slot_out['attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['intra_attn'])
 
-            aud_slot_out['slots_sorted'] = torch.stack([
-                aud_slot_out['slots'][batch_indices, aud_target_slot_idx],
-                aud_slot_out['slots'][batch_indices, aud_offtarget_slot_idx]
-            ], dim=1)
-
-            img_slot_out['slots_sorted'] = torch.stack([
-                img_slot_out['slots'][batch_indices, img_target_slot_idx],
-                img_slot_out['slots'][batch_indices, img_offtarget_slot_idx]
-            ], dim=1)
-            
-            aud_slot_out['q_sorted'] = torch.stack([
-                aud_slot_out['q'][batch_indices, aud_target_slot_idx],
-                aud_slot_out['q'][batch_indices, aud_offtarget_slot_idx]
-            ], dim=1)
-
-            img_slot_out['q_sorted'] = torch.stack([
-                img_slot_out['q'][batch_indices, img_target_slot_idx],
-                img_slot_out['q'][batch_indices, img_offtarget_slot_idx]
-            ], dim=1)
-
-            aud_slot_out['attn_sorted'] = torch.stack([
-                aud_slot_out['intra_attn'][batch_indices, aud_target_slot_idx],
-                aud_slot_out['intra_attn'][batch_indices, aud_offtarget_slot_idx]
-            ], dim=1)
-
-            img_slot_out['attn_sorted'] = torch.stack([
-                img_slot_out['intra_attn'][batch_indices, img_target_slot_idx],
-                img_slot_out['intra_attn'][batch_indices, img_offtarget_slot_idx]
-            ], dim=1)
+            # Optional: permutation consistency regularizer (encourage P_soft ≈ P_hard)
+            if args.use_perm_reg == 'True':
+                y_a = a_choose1.float().detach()
+                y_i = i_choose1.float().detach()
+                loss_perm = permutation_consistency_loss(p_a, y_a, p_i, y_i)
+            else:
+                loss_perm = None
 
         else:
             aud_slot_out['slots_sorted'] = aud_slot_out['slots']
@@ -479,7 +472,9 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
             
         loss_info_nce, loss_match, loss_div, loss_recon = compute_loss(img_slot_out, aud_slot_out, args, mode='train')
 
-        loss = loss_info_nce + loss_match + loss_div + loss_recon      
+        loss = loss_info_nce + loss_match + loss_div + loss_recon
+        if args.slots_maxsim == 'True' and args.use_perm_reg == 'True' and loss_perm is not None:
+            loss = loss + args.lambda_perm * loss_perm      
 
         # Update running averages
         avg_total_loss.update(loss.item())
@@ -522,6 +517,7 @@ def train(train_loader, model, optimizer, scheduler, epoch, args):
                     'train/batch_matching_loss': loss_match.item(),
                     'train/batch_divergence_loss': loss_div.item(),
                     'train/batch_reconstruction_loss': loss_recon.item(),
+                    **({'train/batch_perm_loss': loss_perm.item()} if (args.slots_maxsim == 'True' and args.use_perm_reg == 'True' and loss_perm is not None) else {}),
                     # Batch-level average losses (logged per step)
                     'train/batch_avg_total_loss': avg_total_loss.avg,
                     'train/batch_avg_info_nce_loss': avg_info_nce_loss.avg,
@@ -602,72 +598,54 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
             aud_slot_out, img_slot_out = model(image.float(), spec.float())
             
             if args.slots_maxsim == 'True':
-                aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
-                img_slots = F.normalize(img_slot_out['slots'], dim=1)
+                # Normalize per-slot vectors on channel dim
+                aud_slots = F.normalize(aud_slot_out['slots'], dim=2)
+                img_slots = F.normalize(img_slot_out['slots'], dim=2)
                 
-                # Compute all pairwise similarities between audio and image slots across the batch: [B, N, N]
-                similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)  # [B, N, M]
-                # For each element in the batch, find (n,m) indices where similarity is maximum
-                max_sim_indices = similarity_slots.reshape(similarity_slots.shape[0], -1).argmax(dim=1)  # [B]
-                target_audio_indices = max_sim_indices // similarity_slots.shape[2]  # n (slot of audio)
-                target_image_indices = max_sim_indices % similarity_slots.shape[2]   # m (slot of image)
-                # Stack to get indices per batch: shape [B, 2], where [:,0] is audio, [:,1] is image slot index of max sim
-                max_slot_indices = torch.stack([target_audio_indices, target_image_indices], dim=1)
+                # Pairwise similarity S[b, n_a, n_i]
+                similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)
 
                 B, N, C = aud_slots.shape
+                assert N == 2, "STE sort implemented for num_slots=2"
 
-                # Prepare for correct slot sorting based on new max_slot_indices layout
-                batch_indices = torch.arange(B, device=aud_slots.device)
+                # Audio STE permutation
+                a0_best = similarity_slots[:, 0, :].max(dim=1).values
+                a1_best = similarity_slots[:, 1, :].max(dim=1).values
+                logits_a = (a1_best - a0_best) / 0.3
+                p_a = torch.sigmoid(logits_a)
+                P_a_soft = torch.stack([
+                    torch.stack([1 - p_a, p_a], dim=1),
+                    torch.stack([p_a, 1 - p_a], dim=1)
+                ], dim=1)
+                a_choose1 = (p_a > 0.5).long()
+                P_a_hard = torch.zeros_like(P_a_soft)
+                P_a_hard[torch.arange(B, device=P_a_soft.device), 0, a_choose1] = 1
+                P_a_hard[torch.arange(B, device=P_a_soft.device), 1, 1 - a_choose1] = 1
+                P_a = P_a_hard.detach() - P_a_soft.detach() + P_a_soft
 
-                # For audio: for each example b, use audio slot index for (b,b) and (b,(b+1)%B)
-                aud_target_slot_idx = []
-                aud_offtarget_slot_idx = []
+                # Image STE permutation
+                i0_best = similarity_slots[:, :, 0].max(dim=1).values
+                i1_best = similarity_slots[:, :, 1].max(dim=1).values
+                logits_i = (i1_best - i0_best) / 0.3
+                p_i = torch.sigmoid(logits_i)
+                P_i_soft = torch.stack([
+                    torch.stack([1 - p_i, p_i], dim=1),
+                    torch.stack([p_i, 1 - p_i], dim=1)
+                ], dim=1)
+                i_choose1 = (p_i > 0.5).long()
+                P_i_hard = torch.zeros_like(P_i_soft)
+                P_i_hard[torch.arange(B, device=P_i_soft.device), 0, i_choose1] = 1
+                P_i_hard[torch.arange(B, device=P_i_soft.device), 1, 1 - i_choose1] = 1
+                P_i = P_i_hard.detach() - P_i_soft.detach() + P_i_soft
+
+                aud_slot_out['slots_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['slots'])
+                img_slot_out['slots_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['slots'])
                 
-                img_target_slot_idx = []
-                img_offtarget_slot_idx = []
+                aud_slot_out['q_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['q'])
+                img_slot_out['q_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['q'])
                 
-                for b in range(B):
-                    aud_target_slot_idx.append(max_slot_indices[b, 0])
-                    if max_slot_indices[b, 0] == 0:
-                        aud_offtarget_slot_idx.append(1)
-                    else:
-                        aud_offtarget_slot_idx.append(0)
-                        
-                    img_target_slot_idx.append(max_slot_indices[b, 1])
-                    if max_slot_indices[b, 1] == 0:
-                        img_offtarget_slot_idx.append(1)
-                    else:
-                        img_offtarget_slot_idx.append(0)
-
-                aud_slot_out['slots_sorted'] = torch.stack([
-                    aud_slot_out['slots'][batch_indices, aud_target_slot_idx],
-                    aud_slot_out['slots'][batch_indices, aud_offtarget_slot_idx]
-                ], dim=1)
-
-                img_slot_out['slots_sorted'] = torch.stack([
-                    img_slot_out['slots'][batch_indices, img_target_slot_idx],
-                    img_slot_out['slots'][batch_indices, img_offtarget_slot_idx]
-                ], dim=1)
-                
-                aud_slot_out['q_sorted'] = torch.stack([
-                    aud_slot_out['q'][batch_indices, aud_target_slot_idx],
-                    aud_slot_out['q'][batch_indices, aud_offtarget_slot_idx]
-                ], dim=1)
-
-                img_slot_out['q_sorted'] = torch.stack([
-                    img_slot_out['q'][batch_indices, img_target_slot_idx],
-                    img_slot_out['q'][batch_indices, img_offtarget_slot_idx]
-                ], dim=1)
-
-                aud_slot_out['attn_sorted'] = torch.stack([
-                    aud_slot_out['intra_attn'][batch_indices, aud_target_slot_idx],
-                    aud_slot_out['intra_attn'][batch_indices, aud_offtarget_slot_idx]
-                ], dim=1)
-
-                img_slot_out['attn_sorted'] = torch.stack([
-                    img_slot_out['intra_attn'][batch_indices, img_target_slot_idx],
-                    img_slot_out['intra_attn'][batch_indices, img_offtarget_slot_idx]
-                ], dim=1)
+                aud_slot_out['attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['intra_attn'])
+                img_slot_out['attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['intra_attn'])
 
             else:
                 aud_slot_out['slots_sorted'] = aud_slot_out['slots']
@@ -852,60 +830,48 @@ def validate(test_loader, model, args, epoch):
             aud_slot_out, img_slot_out = model(image.float(), spec.float())
 
             if args.slots_maxsim == 'True':
-                # Find which is the positive slot based on maximum similarity
-                aud_slots = F.normalize(aud_slot_out['slots'], dim=1)
-                img_slots = F.normalize(img_slot_out['slots'], dim=1)
+                # Normalize per-slot vectors over channel dim
+                aud_slots = F.normalize(aud_slot_out['slots'], dim=2)
+                img_slots = F.normalize(img_slot_out['slots'], dim=2)
                 
-                # Compute all pairwise similarities between audio and image slots across the batch: [B, N, N]
-                similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)  # [B, N, M]
-                # For each element in the batch, find (n,m) indices where similarity is maximum
-                max_sim_indices = similarity_slots.reshape(similarity_slots.shape[0], -1).argmax(dim=1)  # [B]
-                target_audio_indices = max_sim_indices // similarity_slots.shape[2]  # n (slot of audio)
-                target_image_indices = max_sim_indices % similarity_slots.shape[2]   # m (slot of image)
-                # Stack to get indices per batch: shape [B, 2], where [:,0] is audio, [:,1] is image slot index of max sim
-                max_slot_indices = torch.stack([target_audio_indices, target_image_indices], dim=1)
+                # Pairwise similarities
+                similarity_slots = torch.einsum('bnc,bmc->bnm', aud_slots, img_slots)
 
                 B, N, C = aud_slots.shape
+                assert N == 2, "STE sort implemented for num_slots=2"
 
-                # Prepare for correct slot sorting based on new max_slot_indices layout
-                batch_indices = torch.arange(B, device=aud_slots.device)
-
-                # For audio: for each example b, use audio slot index for (b,b) and (b,(b+1)%B)
-                aud_target_slot_idx = []
-                aud_offtarget_slot_idx = []
-                
-                img_target_slot_idx = []
-                img_offtarget_slot_idx = []
-                
-                for b in range(B):
-                    aud_target_slot_idx.append(max_slot_indices[b, 0])
-                    if max_slot_indices[b, 0] == 0:
-                        aud_offtarget_slot_idx.append(1)
-                    else:
-                        aud_offtarget_slot_idx.append(0)
-                        
-                    img_target_slot_idx.append(max_slot_indices[b, 1])
-                    if max_slot_indices[b, 1] == 0:
-                        img_offtarget_slot_idx.append(1)
-                    else:
-                        img_offtarget_slot_idx.append(0)
-                        
-                # aud_target_slot_idx = max_slot_indices[batch_indices, 0]  # shape: [B]
-                # aud_offtarget_slot_idx = max_slot_indices[(batch_indices + 1) % B, 0]
-
-                # # For image: use image slot index for (b,b) and (b,(b+1)%B)
-                # img_target_slot_idx = max_slot_indices[batch_indices, 1]  # shape: [B]
-                # img_offtarget_slot_idx = max_slot_indices[(batch_indices + 1) % B, 1]
-
-                aud_slot_out['slots_sorted'] = torch.stack([
-                    aud_slot_out['slots'][batch_indices, aud_target_slot_idx],
-                    aud_slot_out['slots'][batch_indices, aud_offtarget_slot_idx]
+                # Audio STE permutation
+                a0_best = similarity_slots[:, 0, :].max(dim=1).values
+                a1_best = similarity_slots[:, 1, :].max(dim=1).values
+                logits_a = (a1_best - a0_best) / 0.3
+                p_a = torch.sigmoid(logits_a)
+                P_a_soft = torch.stack([
+                    torch.stack([1 - p_a, p_a], dim=1),
+                    torch.stack([p_a, 1 - p_a], dim=1)
                 ], dim=1)
+                a_choose1 = (p_a > 0.5).long()
+                P_a_hard = torch.zeros_like(P_a_soft)
+                P_a_hard[torch.arange(B, device=P_a_soft.device), 0, a_choose1] = 1
+                P_a_hard[torch.arange(B, device=P_a_soft.device), 1, 1 - a_choose1] = 1
+                P_a = P_a_hard.detach() - P_a_soft.detach() + P_a_soft
 
-                img_slot_out['slots_sorted'] = torch.stack([
-                    img_slot_out['slots'][batch_indices, img_target_slot_idx],
-                    img_slot_out['slots'][batch_indices, img_offtarget_slot_idx]
+                # Image STE permutation
+                i0_best = similarity_slots[:, :, 0].max(dim=1).values
+                i1_best = similarity_slots[:, :, 1].max(dim=1).values
+                logits_i = (i1_best - i0_best) / 0.3
+                p_i = torch.sigmoid(logits_i)
+                P_i_soft = torch.stack([
+                    torch.stack([1 - p_i, p_i], dim=1),
+                    torch.stack([p_i, 1 - p_i], dim=1)
                 ], dim=1)
+                i_choose1 = (p_i > 0.5).long()
+                P_i_hard = torch.zeros_like(P_i_soft)
+                P_i_hard[torch.arange(B, device=P_i_soft.device), 0, i_choose1] = 1
+                P_i_hard[torch.arange(B, device=P_i_soft.device), 1, 1 - i_choose1] = 1
+                P_i = P_i_hard.detach() - P_i_soft.detach() + P_i_soft
+
+                aud_slot_out['slots_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['slots'])
+                img_slot_out['slots_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['slots'])
                 
             else:
                 aud_slot_out['slots_sorted'] = aud_slot_out['slots']
