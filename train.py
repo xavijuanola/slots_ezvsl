@@ -76,6 +76,7 @@ def get_arguments():
 
     # training/evaluation parameters
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
+    parser.add_argument('--log_debug_attentions', type=str, default='False', help='log debug attentions')
     parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
     parser.add_argument('--visual_dropout', type=str, default='False', help='visual dropout')
     parser.add_argument('--visual_dropout_ratio', type=float, default=0.7, help='visual dropout ratio')
@@ -648,6 +649,15 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 aud_slot_out['attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['intra_attn'])
                 img_slot_out['attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['intra_attn'])
+                
+                img_slot_out['debug_dots_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['debug_dots'])
+                aud_slot_out['debug_dots_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['debug_dots'])
+                
+                img_slot_out['debug_attn_pre_norm_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['debug_attn_pre_norm'])
+                aud_slot_out['debug_attn_pre_norm_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['debug_attn_pre_norm'])
+                
+                img_slot_out['debug_attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_i, img_slot_out['debug_attn'])
+                aud_slot_out['debug_attn_sorted'] = torch.einsum('bnm,bmc->bnc', P_a, aud_slot_out['debug_attn'])
 
             else:
                 aud_slot_out['slots_sorted'] = aud_slot_out['slots']
@@ -658,6 +668,15 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 
                 aud_slot_out['attn_sorted'] = aud_slot_out['intra_attn']
                 img_slot_out['attn_sorted'] = img_slot_out['intra_attn']
+                
+                img_slot_out['debug_dots_sorted'] = img_slot_out['debug_dots']
+                aud_slot_out['debug_dots_sorted'] = aud_slot_out['debug_dots']
+                
+                img_slot_out['debug_attn_pre_norm_sorted'] = img_slot_out['debug_attn_pre_norm']
+                aud_slot_out['debug_attn_pre_norm_sorted'] = aud_slot_out['debug_attn_pre_norm']
+                
+                img_slot_out['debug_attn_sorted'] = img_slot_out['debug_attn']
+                aud_slot_out['debug_attn_sorted'] = aud_slot_out['debug_attn']
             
             # Compute cross-modal attention
             cross_modal_attention_ai = torch.einsum('bid,bjd->bij', aud_slot_out['q_sorted'], img_slot_out['k']) * (512 ** -0.5)
@@ -812,6 +831,52 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                 fig_img7_cross = gen_pred_figure(img7_up, img_cross7_t_up, img_cross7_o_up)
                 wandb.log({f"{filename[i]}_{mode}/crossmodal_image_native7x7": wandb.Image(fig_img7_cross), 'epoch': epoch})
                 plt.close(fig_img7_cross)
+                
+                # Log debug values from slot attention iterations
+                if args.wandb == 'True' and args.log_debug_attentions == 'True':
+                    # Log image slot attention debug values
+                    if 'debug_dots_sorted' in img_slot_out and img_slot_out['debug_dots_sorted']:
+                        for it_idx, dots in enumerate(img_slot_out['debug_dots_sorted']):
+                            dots_np = dots[0].cpu().numpy().reshape(dots[0].shape[0], 7, 7)  # (num_slots, 7, 7)
+                            fig = gen_debug_slot_figure(dots_np, f'Image Dots - Iteration {it_idx}', modality='image')
+                            wandb.log({f'{filename[i]}_{mode}/debug/dots_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            plt.close(fig)
+                    
+                    if 'debug_attn_pre_norm_sorted' in img_slot_out and img_slot_out['debug_attn_pre_norm_sorted']:
+                        for it_idx, attn_pre_norm in enumerate(img_slot_out['debug_attn_pre_norm_sorted']):
+                            attn_pre_norm_np = attn_pre_norm[0].cpu().numpy().reshape(attn_pre_norm[0].shape[0], 7, 7)  # (num_slots, 7, 7)
+                            fig = gen_debug_slot_figure(attn_pre_norm_np, f'Image Attn Pre Norm - Iteration {it_idx}', modality='image')
+                            wandb.log({f'{filename[i]}_{mode}/debug/attn_pre_norm_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            plt.close(fig)
+                    
+                    if 'debug_attn_sorted' in img_slot_out and img_slot_out['debug_attn_sorted']:
+                        for it_idx, attn in enumerate(img_slot_out['debug_attn_sorted']):
+                            attn_np = attn[0].cpu().numpy().reshape(attn[0].shape[0], 7, 7)  # (num_slots, 7, 7)
+                            fig = gen_debug_slot_figure(attn_np, f'Image Attn - Iteration {it_idx}', modality='image')
+                            wandb.log({f'{filename[i]}_{mode}/debug/attn_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            plt.close(fig)
+                    
+                    # Log audio slot attention debug values
+                    if 'debug_dots_sorted' in aud_slot_out and aud_slot_out['debug_dots_sorted']:
+                        for it_idx, dots in enumerate(aud_slot_out['debug_dots_sorted']):
+                            dots_np = dots[0].cpu().numpy()  # (num_slots, seq_len)
+                            fig = gen_debug_slot_figure(dots_np, f'Audio Dots - Iteration {it_idx}', modality='audio')
+                            wandb.log({f'{filename[i]}_{mode}/debug/dots_aud_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            plt.close(fig)
+                    
+                    if 'debug_attn_pre_norm_sorted' in aud_slot_out and aud_slot_out['debug_attn_pre_norm_sorted']:
+                        for it_idx, attn_pre_norm in enumerate(aud_slot_out['debug_attn_pre_norm_sorted']):
+                            attn_pre_norm_np = attn_pre_norm[0].cpu().numpy()  # (num_slots, seq_len)
+                            fig = gen_debug_slot_figure(attn_pre_norm_np, f'Audio Attn Pre Norm - Iteration {it_idx}', modality='audio')
+                            wandb.log({f'{filename[i]}_{mode}/debug/attn_pre_norm_aud_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            plt.close(fig)
+                    
+                    if 'debug_attn_sorted' in aud_slot_out and aud_slot_out['debug_attn_sorted']:
+                        for it_idx, attn in enumerate(aud_slot_out['debug_attn_sorted']):
+                            attn_np = attn[0].cpu().numpy()  # (num_slots, seq_len)
+                            fig = gen_debug_slot_figure(attn_np, f'Audio Attn - Iteration {it_idx}', modality='audio')
+                            wandb.log({f'{filename[i]}_{mode}/debug/attn_aud_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            plt.close(fig)
 
 
 def validate(test_loader, model, args, epoch):
@@ -1084,6 +1149,50 @@ def gen_spec_pred_figure(orig_spec, pred=None, off_target=None):
     plt.tight_layout()
     return fig
 
+
+def gen_debug_slot_figure(data_np, title, modality='image'):
+    """
+    Create a figure with subplots showing each slot's attention/dots.
+    
+    Args:
+        data_np: numpy array of shape (num_slots, ...) 
+                 - For images: (num_slots, 7, 7)
+                 - For audio: (num_slots, seq_len)
+        title: Title for the figure
+        modality: 'image' or 'audio' to determine labels
+    
+    Returns:
+        matplotlib figure
+    """
+    num_slots = data_np.shape[0]
+    fig, axes = plt.subplots(1, num_slots, figsize=(6 * num_slots, 5))
+    
+    # Handle single subplot case
+    if num_slots == 1:
+        axes = [axes]
+    
+    for slot_idx in range(num_slots):
+        if modality == 'image' and len(data_np.shape) == 3:
+            # Image case: (num_slots, 7, 7)
+            im = axes[slot_idx].imshow(data_np[slot_idx], aspect='auto', cmap='jet')
+            axes[slot_idx].set_xlabel('X Position')
+            axes[slot_idx].set_ylabel('Y Position')
+        else:
+            # Audio case: (num_slots, seq_len)
+            # Reshape 1D array to 2D for visualization (1, seq_len) - horizontal temporal dimension
+            slot_data = data_np[slot_idx]
+            if len(slot_data.shape) == 1:
+                slot_data = slot_data.reshape(1, -1)  # (1, 7) - horizontal layout
+            im = axes[slot_idx].imshow(slot_data, aspect='auto', cmap='jet')
+            axes[slot_idx].set_xlabel('Sequence Position')
+            axes[slot_idx].set_ylabel('')
+        
+        axes[slot_idx].set_title(f'Slot {slot_idx}')
+        plt.colorbar(im, ax=axes[slot_idx])
+    
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    return fig
 
 def gen_pred_figure(orig_img, pred=None, off_target=None):
     if off_target is not None:

@@ -191,13 +191,9 @@ class EZVSL(nn.Module):
         aud_seq = aud_temp.contiguous().permute(0, 2, 1)  # (B, 9, 512) - temporal dimension
         
         if self.args.n_attention_modules == 1:
-            # img_slot_out = self.slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
-            # aud_slot_out = self.slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
             img_slot_out = self.slot_attention(img_seq, shared_init_slots=slots_image)
             aud_slot_out = self.slot_attention(aud_seq, shared_init_slots=slots_audio)
         else:
-            # img_slot_out = self.image_slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
-            # aud_slot_out = self.audio_slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
             img_slot_out = self.image_slot_attention(img_seq, shared_init_slots=slots_image)
             aud_slot_out = self.audio_slot_attention(aud_seq, shared_init_slots=slots_audio)
 
@@ -248,14 +244,24 @@ class SlotAttention(nn.Module):
         k, v = self.w_k(inputs), self.w_v(inputs) 
         slots = shared_init_slots.clone()
         
+        # Store debug values for each iteration
+        debug_dots = []
+        debug_attn_pre_norm = []
+        debug_attn = []
+        
         for i in range(self.iters): 
             slots_prev = slots.clone()
             slots = self.LayerNorm_slots(slots)  
             q = self.w_q(slots) 
             
             dots = torch.einsum('bid,bjd->bij', q, k) * self.scale 
+            debug_dots.append(dots.detach().clone())
+            
             attn_pre_norm = dots.softmax(dim=1) 
+            debug_attn_pre_norm.append(attn_pre_norm.detach().clone())
+            
             attn = attn_pre_norm / (attn_pre_norm.sum(dim=-1, keepdim=True) + self.eps )
+            debug_attn.append(attn.detach().clone())
             
             updates = torch.einsum('bjd,bij->bid', v, attn) 
             
@@ -271,7 +277,15 @@ class SlotAttention(nn.Module):
             slots = slots.unflatten(0, (b, 2))
             # slots = slots.reshape(b, -1, d) 
 
-        slots_data = { 'slots': slots, 'q': q, 'k': k, 'intra_attn': attn } 
+        slots_data = { 
+            'slots': slots, 
+            'q': q, 
+            'k': k, 
+            'intra_attn': attn,
+            'debug_dots': debug_dots,
+            'debug_attn_pre_norm': debug_attn_pre_norm,
+            'debug_attn': debug_attn
+        } 
         
         return slots_data
 
