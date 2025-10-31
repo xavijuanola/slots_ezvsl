@@ -3,6 +3,32 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision.models import resnet18
 import copy
+import math
+
+
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for transformer-like attention."""
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        
+        self.register_buffer('pe', pe)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape (batch_size, seq_len, d_model)
+        Returns:
+            Tensor with positional encoding added
+        """
+        seq_len = x.size(1)
+        return x + self.pe[:, :seq_len, :]
 
 
 class EZVSL(nn.Module):
@@ -81,6 +107,18 @@ class EZVSL(nn.Module):
 
         self.img_slot_decoder = SlotDecoder(slot_dim=args.num_slots * dim, hidden_dim=dim)
         self.aud_slot_decoder = SlotDecoder(slot_dim=args.num_slots * dim, hidden_dim=dim)
+        
+        # Positional encoding for image (spatial dimension) and audio (temporal dimension)
+        # Both use 512-dim embeddings from resnet
+        if args.use_pos_encoding_img == 'True':
+            self.img_pos_encoding = PositionalEncoding(d_model=512, max_len=100)
+        else:
+            self.img_pos_encoding = None
+            
+        if args.use_pos_encoding_aud == 'True':
+            self.aud_pos_encoding = PositionalEncoding(d_model=512, max_len=100)
+        else:
+            self.aud_pos_encoding = None
                 
         # Initialize weights (except pretrained visual model)
         for net in [self.audnet, self.img_conv1d, self.aud_conv1d]:
@@ -107,6 +145,14 @@ class EZVSL(nn.Module):
         # Image
         img = self.imgnet(image).unflatten(1, (512, 49))
         
+        # Apply positional encoding to image embeddings (spatial dimension) right after resnet
+        if self.img_pos_encoding is not None:
+            # Permute to (B, seq_len, dim) format for positional encoding: (B, 512, 49) -> (B, 49, 512)
+            img_seq = img.contiguous().permute(0, 2, 1)  # (B, 49, 512) - spatial dimension
+            img_seq = self.img_pos_encoding(img_seq)
+            # Permute back to original format: (B, 49, 512) -> (B, 512, 49)
+            img = img_seq.permute(0, 2, 1)  # (B, 512, 49)
+        
         if self.args.visual_dropout == 'True':
             # Apply dropout to the image features
             img = self.visual_dropout(img)
@@ -118,6 +164,15 @@ class EZVSL(nn.Module):
         # Audio
         aud = self.audnet(audio).unflatten(1, (512, 9, 7))
         aud_temp = aud.clone().max(dim=2).values # Max-Pooling over frequency dimension
+        
+        # Apply positional encoding to audio embeddings (temporal dimension) right after frequency pooling
+        if self.aud_pos_encoding is not None:
+            # Permute to (B, seq_len, dim) format for positional encoding: (B, 512, 7) -> (B, 7, 512)
+            aud_seq = aud_temp.contiguous().permute(0, 2, 1)  # (B, 7, 512) - temporal dimension
+            aud_seq = self.aud_pos_encoding(aud_seq)
+            # Permute back to original format: (B, 7, 512) -> (B, 512, 7)
+            aud_temp = aud_seq.permute(0, 2, 1)  # (B, 512, 7)
+        
         aud_pool = aud_temp.clone().max(dim=-1).values # Max-Pooling over temporal dimension
         aud_pool_proj = self.aud_conv1d(aud_pool.unsqueeze(-1)).squeeze(-1)
         aud_pool_proj = nn.functional.normalize(aud_pool_proj, dim=1)
@@ -131,12 +186,20 @@ class EZVSL(nn.Module):
         slots_audio = slots.clone()
 
         # Slot Attention
+        # Permute to (B, seq_len, dim) format for slot attention
+        img_seq = img.contiguous().permute(0, 2, 1)  # (B, 49, 512) - spatial dimension
+        aud_seq = aud_temp.contiguous().permute(0, 2, 1)  # (B, 9, 512) - temporal dimension
+        
         if self.args.n_attention_modules == 1:
-            img_slot_out = self.slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
-            aud_slot_out = self.slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
+            # img_slot_out = self.slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
+            # aud_slot_out = self.slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
+            img_slot_out = self.slot_attention(img_seq, shared_init_slots=slots_image)
+            aud_slot_out = self.slot_attention(aud_seq, shared_init_slots=slots_audio)
         else:
-            img_slot_out = self.image_slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
-            aud_slot_out = self.audio_slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
+            # img_slot_out = self.image_slot_attention(img.contiguous().permute(0,2,1), shared_init_slots=slots_image)
+            # aud_slot_out = self.audio_slot_attention(aud_temp.contiguous().permute(0,2,1), shared_init_slots=slots_audio)
+            img_slot_out = self.image_slot_attention(img_seq, shared_init_slots=slots_image)
+            aud_slot_out = self.audio_slot_attention(aud_seq, shared_init_slots=slots_audio)
 
         img_recon = self.img_slot_decoder(img_slot_out['slots'].contiguous().view((img_slot_out['slots'].shape[0], -1)))
         aud_recon = self.aud_slot_decoder(aud_slot_out['slots'].contiguous().view((aud_slot_out['slots'].shape[0], -1)))

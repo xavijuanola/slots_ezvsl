@@ -79,6 +79,8 @@ def get_arguments():
     parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
     parser.add_argument('--visual_dropout', type=str, default='False', help='visual dropout')
     parser.add_argument('--visual_dropout_ratio', type=float, default=0.7, help='visual dropout ratio')
+    parser.add_argument('--use_pos_encoding_img', type=str, default='False', help='use positional encoding for image embeddings (spatial dimension)')
+    parser.add_argument('--use_pos_encoding_aud', type=str, default='False', help='use positional encoding for audio embeddings (temporal dimension)')
     parser.add_argument('--image_augmentations', type=str, default='ssltie', help='["No", "ssltie", "ezvsl"]')
     parser.add_argument('--audio_augmentations', type=str, default='ssltie', help='["No", "ssltie"]')
     parser.add_argument("--epochs", type=int, default=20, help="number of epochs")

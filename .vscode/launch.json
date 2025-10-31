@@ -30,7 +30,7 @@
                 "--audio_augmentations",
                 "False",
                 "--slots_maxsim",
-                "True",
+                "False",
                 "--debug",
                 "True",
                 "--batch_size",
@@ -71,6 +71,10 @@
                 "0.1",
                 "--lambda_div",
                 "0.1",
+                "--use_pos_encoding_img",
+                "True",
+                "--use_pos_encoding_aud",
+                "True",
             ]
         }
     ]
