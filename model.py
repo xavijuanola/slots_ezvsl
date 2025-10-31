@@ -282,9 +282,9 @@ class SlotAttention(nn.Module):
             'q': q, 
             'k': k, 
             'intra_attn': attn,
-            'debug_dots': debug_dots,
-            'debug_attn_pre_norm': debug_attn_pre_norm,
-            'debug_attn': debug_attn
+            'debug_dots': torch.stack(debug_dots),
+            'debug_attn_pre_norm': torch.stack(debug_attn_pre_norm),
+            'debug_attn': torch.stack(debug_attn)
         } 
         
         return slots_data
