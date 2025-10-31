@@ -837,21 +837,21 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                     # Log image slot attention debug values
                     if 'debug_dots_sorted' in img_slot_out:
                         for it_idx, dots in enumerate(img_slot_out['debug_dots_sorted']):
-                            dots_np = dots[i].cpu().numpy().reshape(dots[0].shape[0], 7, 7)  # (num_slots, 7, 7)
+                            dots_np = dots[0].cpu().numpy().reshape(dots[0].shape[0], 7, 7)  # (num_slots, 7, 7)
                             fig = gen_debug_slot_figure(dots_np, f'Image Dots - Iteration {it_idx}', modality='image')
                             wandb.log({f'{filename[i]}_{mode}/debug/dots_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
                             plt.close(fig)
                     
                     if 'debug_attn_pre_norm_sorted' in img_slot_out:
                         for it_idx, attn_pre_norm in enumerate(img_slot_out['debug_attn_pre_norm_sorted']):
-                            attn_pre_norm_np = attn_pre_norm[i].cpu().numpy().reshape(attn_pre_norm[0].shape[0], 7, 7)  # (num_slots, 7, 7)
+                            attn_pre_norm_np = attn_pre_norm[0].cpu().numpy().reshape(attn_pre_norm[0].shape[0], 7, 7)  # (num_slots, 7, 7)
                             fig = gen_debug_slot_figure(attn_pre_norm_np, f'Image Attn Pre Norm - Iteration {it_idx}', modality='image')
                             wandb.log({f'{filename[i]}_{mode}/debug/attn_pre_norm_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
                             plt.close(fig)
                     
                     if 'debug_attn_sorted' in img_slot_out:
                         for it_idx, attn in enumerate(img_slot_out['debug_attn_sorted']):
-                            attn_np = attn[i].cpu().numpy().reshape(attn[0].shape[0], 7, 7)  # (num_slots, 7, 7)
+                            attn_np = attn[0].cpu().numpy().reshape(attn[0].shape[0], 7, 7)  # (num_slots, 7, 7)
                             fig = gen_debug_slot_figure(attn_np, f'Image Attn - Iteration {it_idx}', modality='image')
                             wandb.log({f'{filename[i]}_{mode}/debug/attn_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
                             plt.close(fig)
@@ -859,7 +859,7 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                     # Log audio slot attention debug values
                     if 'debug_dots_sorted' in aud_slot_out:
                         for it_idx, dots in enumerate(aud_slot_out['debug_dots_sorted']):
-                            dots_np = dots[i].cpu().numpy()  # (num_slots, seq_len)
+                            dots_np = dots[0].cpu().numpy()  # (num_slots, seq_len)
                             fig = gen_debug_slot_figure(dots_np, f'Audio Dots - Iteration {it_idx}', modality='audio')
                             wandb.log({f'{filename[i]}_{mode}/debug/dots_aud_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
                             plt.close(fig)
@@ -868,7 +868,7 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                         for it_idx, attn_pre_norm in enumerate(aud_slot_out['debug_attn_pre_norm_sorted']):
                             attn_pre_norm_np = attn_pre_norm[i].cpu().numpy()  # (num_slots, seq_len)
                             fig = gen_debug_slot_figure(attn_pre_norm_np, f'Audio Attn Pre Norm - Iteration {it_idx}', modality='audio')
-                            wandb.log({f'{filename[i]}_{mode}/debug/attn_pre_norm_aud_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
+                            wandb.log({f'{filename[0]}_{mode}/debug/attn_pre_norm_aud_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
                             plt.close(fig)
                     
                     if 'debug_attn_sorted' in aud_slot_out:

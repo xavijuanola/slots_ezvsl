@@ -75,6 +75,8 @@
                 "True",
                 "--use_pos_encoding_aud",
                 "True",
+                "--log_debug_attentions",
+                "True",
             ]
         }
     ]
