@@ -222,9 +222,12 @@ class SlotAttention(nn.Module):
         self.eps = eps 
         self.scale = dim_out ** -0.5 
 
-        self.w_q = nn.Linear(dim_out, dim_out, bias=(self.args.w_bias == 'True')) 
-        self.w_k = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
-        self.w_v = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
+        if args.shared_weights == 'True':
+            self.w = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
+        else:
+            self.w_q = nn.Linear(dim_out, dim_out, bias=(self.args.w_bias == 'True')) 
+            self.w_k = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
+            self.w_v = nn.Linear(dim_in, dim_out, bias=(self.args.w_bias == 'True')) 
 
         if self.args.add_gru == 'True':
             self.gru = nn.GRUCell(dim_out, dim_out) 
@@ -241,7 +244,10 @@ class SlotAttention(nn.Module):
         b, n, d, device, dtype = *inputs.shape, inputs.device, inputs.dtype 
         
         inputs = self.LayerNorm_input(inputs) 
-        k, v = self.w_k(inputs), self.w_v(inputs) 
+        if self.args.shared_weights == 'True':
+            k, v = self.w(inputs), self.w(inputs) 
+        else:
+            k, v = self.w_k(inputs), self.w_v(inputs) 
         slots = shared_init_slots.clone()
         
         # Store debug values for each iteration
@@ -252,7 +258,10 @@ class SlotAttention(nn.Module):
         for i in range(self.iters): 
             slots_prev = slots.clone()
             slots = self.LayerNorm_slots(slots)  
-            q = self.w_q(slots) 
+            if self.args.shared_weights == 'True':
+                q = self.w(slots) 
+            else:
+                q = self.w_q(slots) 
             
             dots = torch.einsum('bid,bjd->bij', q, k) * self.scale 
             debug_dots.append(dots.detach().clone())

@@ -59,6 +59,7 @@ def get_arguments():
     parser.add_argument('--add_mlp', default='True', type=str, help='["False", "True"]')
     parser.add_argument('--w_bias', default='True', type=str, help='whether to use bias in the attention weights')
     parser.add_argument('--n_attention_modules', default=2, type=int, help='number of attention modules')
+    parser.add_argument('--shared_weights', default='False', type=str, help='whether to share weights between attention modules')
     parser.add_argument('--slot_clone', default='True', type=str, help='whether to clone slot attention module (same W initialization)')
     parser.add_argument('--num_slots', default=2, type=int)
     parser.add_argument('--slots_maxsim', default='False', type=str, help='Wether to select target slot based on maximum similarity')
