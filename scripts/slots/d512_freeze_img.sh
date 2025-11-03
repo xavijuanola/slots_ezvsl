@@ -5,13 +5,13 @@ python train.py \
     --trainset 'vggss_144k' \
     --testset 'vggss_144k' \
     --imagenet_pretrain 'True' \
-    --freeze_image_encoder 'False' \
+    --freeze_image_encoder 'True' \
     --image_augmentations 'False' \
     --audio_augmentations 'False' \
     --debug 'False' \
     --wandb 'True' \
     --batch_size 256 \
-    --experiment_name d512_shw \
+    --experiment_name d512_freeze_img \
     --wandb_project 'ezvsl-slots' \
     --w_bias 'True' \
     --num_slots 2 \

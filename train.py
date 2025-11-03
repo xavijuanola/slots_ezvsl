@@ -79,6 +79,7 @@ def get_arguments():
     parser.add_argument('--debug', type=str, default='True', help='debug mode')
     parser.add_argument('--log_debug_attentions', type=str, default='False', help='log debug attentions')
     parser.add_argument('--imagenet_pretrain', type=str, default='True', help='list of imagenet pretrain files')
+    parser.add_argument('--freeze_image_encoder', type=str, default='False', help='whether to freeze image encoder weights during training')
     parser.add_argument('--visual_dropout', type=str, default='False', help='visual dropout')
     parser.add_argument('--visual_dropout_ratio', type=float, default=0.7, help='visual dropout ratio')
     parser.add_argument('--use_pos_encoding_img', type=str, default='False', help='use positional encoding for image embeddings (spatial dimension)')
@@ -170,6 +171,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Create model
     model = EZVSL(args.tau, args.out_dim, args)
+
+    # Freeze image encoder if requested
+    if args.freeze_image_encoder == 'True':
+        for param in model.imgnet.parameters():
+            param.requires_grad = False
+        print("Image encoder frozen - weights will not be updated during training")
 
     if not torch.cuda.is_available():
         print('using CPU, this will be slow')
@@ -838,7 +845,7 @@ def log_file_visualizations(dataset, model, file_list, mode, epoch, args):
                     # Log image slot attention debug values
                     if 'debug_dots_sorted' in img_slot_out:
                         for it_idx, dots in enumerate(img_slot_out['debug_dots_sorted']):
-                            print(dots.shape)
+                            # print(dots.shape)
                             dots_np = dots[0].reshape(dots[0].shape[0], 7, 7).cpu().numpy()  # (num_slots, 7, 7)
                             fig = gen_debug_slot_figure(dots_np, f'Image Dots - Iteration {it_idx}', modality='image')
                             wandb.log({f'{filename[i]}_{mode}/debug/dots_img_it{it_idx}': wandb.Image(fig), 'epoch': epoch})
